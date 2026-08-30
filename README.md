@@ -11,6 +11,7 @@ jobs/<id>.json     共享层 —— 招聘信息本身，进 git，所有人共�
 local/status.json  个人层 —— 投递状态 + 个人备注，不进 git，只留在本机
 data/jobs.db       索引层 —— 从上面两层派生的 sqlite，可随时重建
 cv/                CV 原文 + <名字>.reading.md 解读文件（格式见 cv/README.md）
+                   —— 和个人层一样不进 git，任何人的都不上传
 ```
 
 改共享层要走 git 同步；改个人层只影响自己，**绝不产生 git diff** ——
