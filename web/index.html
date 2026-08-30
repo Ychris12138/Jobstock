@@ -24,11 +24,11 @@
   nav button:hover { background: rgba(255,255,255,.28); }
   nav button.active { background: #fff; color: var(--accent); font-weight: 700; }
 
-  main { padding: 26px 28px; max-width: 1180px; margin: 0 auto; }
+  main { padding: 26px 28px; max-width: 1280px; margin: 0 auto; }
 
   /* 控件 */
-  .toolbar { display: flex; gap: 12px; margin-bottom: 18px; flex-wrap: wrap; align-items: center; }
-  input, select, textarea { padding: 10px 14px; border: 1.5px solid var(--line); border-radius: 12px;
+  .toolbar { display: flex; gap: 10px; margin-bottom: 12px; flex-wrap: wrap; align-items: center; }
+  input, select, textarea { padding: 9px 13px; border: 1.5px solid var(--line); border-radius: 12px;
                             font-size: 14.5px; font-family: inherit; background: #fff; color: var(--ink);
                             transition: border-color .15s, box-shadow .15s; }
   input:focus, select:focus, textarea:focus { outline: none; border-color: var(--accent);
@@ -40,11 +40,22 @@
   .btn.ghost { background: #fff; color: var(--accent); border: 1.5px solid var(--accent);
                box-shadow: none; }
   .btn.small { padding: 6px 14px; font-size: 13px; }
+  .check { display: inline-flex; align-items: center; gap: 6px; cursor: pointer; user-select: none; }
+  .check input { width: 15px; height: 15px; accent-color: var(--accent); }
+
+  /* 标签筛选条 */
+  .tagbar { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-bottom: 18px;
+            min-height: 20px; }
+  .tag-pick { padding: 4px 14px; border-radius: 999px; font-size: 13.5px; cursor: pointer;
+              background: #fff; border: 1.5px solid var(--line); color: var(--muted);
+              transition: .15s; }
+  .tag-pick:hover { border-color: var(--accent); color: var(--accent); }
+  .tag-pick.on { background: var(--accent); border-color: var(--accent); color: #fff; font-weight: 600; }
 
   /* 表格 */
   table { width: 100%; border-collapse: separate; border-spacing: 0; background: var(--card);
           border-radius: 18px; overflow: hidden; box-shadow: var(--shadow); }
-  th, td { padding: 13px 16px; text-align: left; font-size: 14.5px; border-bottom: 1px solid var(--line); }
+  th, td { padding: 12px 14px; text-align: left; font-size: 14.5px; border-bottom: 1px solid var(--line); }
   th { background: #fafbfe; color: var(--muted); font-weight: 600; font-size: 13.5px;
        letter-spacing: .3px; }
   tbody tr:last-child td { border-bottom: none; }
@@ -56,15 +67,22 @@
   .st-笔试 { background:#fff3d6; color:#b8860b; } .st-面试 { background:#ffe8c2; color:#c2660a; }
   .st-Offer { background:#d3f5e0; color:#1a9e54; } .st-已拒绝 { background:#ffdfe0; color:#d64550; }
   .st-已归档 { background:#f3f4f6; color:#a0a5b1; }
+  .cat { display:inline-block; padding: 3px 12px; border-radius: 8px; font-size: 13px;
+         font-weight: 600; background: var(--accent-soft); color: var(--accent); }
   .urgent { color: #e03131; font-weight: 700; }
+  .local-mark { font-size: 11px; color: var(--muted); font-weight: 500; }
+  .row-tags { font-size: 12.5px; color: var(--muted); }
 
   /* 弹窗 */
-  dialog { border: none; border-radius: 22px; padding: 28px 30px; width: 680px; max-width: 94vw;
+  dialog { border: none; border-radius: 22px; padding: 28px 30px; width: 700px; max-width: 94vw;
            max-height: 88vh; overflow-y: auto; box-shadow: 0 20px 60px rgba(31,36,48,.25); }
   dialog::backdrop { background: rgba(31,36,48,.4); backdrop-filter: blur(2px); }
   .form-grid { display: grid; grid-template-columns: 96px 1fr; gap: 12px 14px; align-items: center; }
   .form-grid label { font-size: 14px; color: var(--muted); text-align: right; font-weight: 600; }
   .form-grid textarea { min-height: 76px; resize: vertical; grid-column: 2; }
+  .sec { grid-column: 1 / -1; margin-top: 14px; padding-bottom: 6px; border-bottom: 1.5px solid var(--line);
+         font-size: 13.5px; font-weight: 700; color: var(--ink); }
+  .sec span { font-weight: 500; color: var(--muted); }
   .dlg-actions { margin-top: 20px; display: flex; gap: 12px; justify-content: flex-end; }
 
   /* 卡片 */
@@ -92,6 +110,9 @@
   pre.prompt { white-space: pre-wrap; background: #f6f7fb; padding: 16px 18px; border-radius: 14px;
                font-size: 13.5px; line-height: 1.7; margin: 12px 0 0; border: 1.5px solid var(--line); }
   .empty { text-align: center; color: var(--muted); padding: 30px 0; font-size: 15px; }
+  .sub-time { display: block; font-size: 11.5px; color: var(--muted); margin-top: 3px; }
+  .warn { background: #fff8e6; border: 1.5px solid #f0d78c; color: #8a6d1f; border-radius: 14px;
+          padding: 12px 16px; margin-bottom: 14px; font-size: 14px; white-space: pre-wrap; }
 </style>
 </head>
 <body>
@@ -104,22 +125,29 @@
 </header>
 <main>
   <section id="page-jobs">
+    <div id="notice" class="warn" hidden></div>
     <div class="toolbar">
       <button class="btn" onclick="openEdit(null)">＋ 新增岗位</button>
-      <select id="f-status" onchange="loadJobs()"><option value="">全部状态</option></select>
+      <select id="f-category" onchange="loadJobs()"><option value="">全部分类</option></select>
       <select id="f-company" onchange="loadJobs()"><option value="">全部公司</option></select>
       <select id="f-location" onchange="loadJobs()"><option value="">全部地点</option></select>
       <select id="f-position" onchange="loadJobs()"><option value="">全部岗位</option></select>
+      <select id="f-source" onchange="loadJobs()"><option value="">全部来源</option></select>
+      <select id="f-status" onchange="loadJobs()"><option value="">全部状态</option></select>
       <label class="muted" for="f-deadline">截止 ≤</label>
       <input id="f-deadline" type="date" onchange="loadJobs()" title="只显示截止日期在此之前的岗位">
-      <input id="f-q" placeholder="🔍 关键词" oninput="loadJobs()">
+      <input id="f-q" placeholder="🔍 关键词（含 JD / 标签 / 备注）" style="min-width:220px" oninput="onSearchInput()">
+      <label class="check muted"><input type="checkbox" id="f-archived" checked onchange="loadJobs()">隐藏已归档</label>
       <button class="btn ghost small" onclick="clearFilters()">清空筛选</button>
-      <button class="btn ghost small" onclick="reindex()" title="AI 手动改了 jobs/*.json 后点这里同步">↻ 重建索引</button>
+      <button class="btn ghost small" onclick="reindex()" title="手动改了 jobs/*.json 后点这里同步到索引">↻ 重建索引</button>
+      <button class="btn ghost small" onclick="syncRepo()" title="git pull --rebase --autostash：只拉取，不推送你自己的改动">⇩ 拉取合作者数据</button>
       <span class="muted" id="count"></span>
     </div>
+    <div class="tagbar" id="tagbar"></div>
     <table>
       <thead><tr>
-        <th>公司</th><th>岗位</th><th>地点</th><th>薪资</th><th>状态</th>
+        <th>公司</th><th>岗位</th><th>分类</th><th>地点</th><th>薪资</th>
+        <th>状态 <span class="local-mark">仅本机</span></th>
         <th>截止</th><th>更新</th><th>快捷状态</th>
       </tr></thead>
       <tbody id="rows"></tbody>
@@ -145,40 +173,70 @@
 <dialog id="dlg">
   <h3 id="dlg-title" style="margin-top:0">新增岗位</h3>
   <div class="form-grid">
+    <div class="sec">🌍 招聘信息 <span>— 进 git，合作者都能看到</span></div>
     <label>公司 *</label><input id="e-company" list="dl-company" placeholder="可选择已有，也可直接输入新公司">
-    <label>岗位 *</label><input id="e-position" list="dl-position" placeholder="可选择已有，也可直接输入新岗位">
-    <label>链接</label><input id="e-url">
+    <label>岗位 *</label><input id="e-position" list="dl-position" placeholder="原始职位名，如：算法工程师(NLP)">
+    <label>分类</label><select id="e-category"></select>
+    <label>链接</label><input id="e-url" placeholder="投递页 / JD 链接">
     <label>地点</label><input id="e-location" list="dl-location" placeholder="可选择已有，也可直接输入新地点">
-    <label>薪资</label><input id="e-salary">
+    <label>薪资</label><input id="e-salary" placeholder="如：30-45K·14薪">
     <label>来源</label><input id="e-source" list="dl-source" placeholder="官网 / 牛客 / 内推…">
-    <label>状态</label><select id="e-status"></select>
     <label>截止</label><input id="e-deadline" type="date">
-    <label>标签</label><input id="e-tags" placeholder="逗号分隔，如：AI4S, 杭州">
-    <label>备注</label><textarea id="e-notes"></textarea>
-    <label>JD 快照</label><textarea id="e-jd" style="min-height:130px"></textarea>
+    <label>标签</label><input id="e-tags" list="dl-tags" placeholder="逗号分隔，如：AI4S, 校招">
+    <label>公共备注</label><textarea id="e-notes" placeholder="对大家都有用的情报，如：内推码有效期到 9 月底、卡 985"></textarea>
+    <label>JD 快照</label><textarea id="e-jd" style="min-height:130px" placeholder="粘贴 JD 原文，会被关键词搜索命中"></textarea>
+
+    <div class="sec">🔒 我的进度 <span>— 只存在本机 local/status.json，不进 git</span></div>
+    <label>状态</label><select id="e-status"></select>
+    <label>个人备注</label><textarea id="e-my_notes" placeholder="自己的投递记录，如：3.5 投的，等一周没回音"></textarea>
   </div>
   <div class="dlg-actions">
     <button class="btn ghost" onclick="dlg.close()">取消</button>
-    <button class="btn" onclick="saveJob()">保存</button>
+    <button class="btn" id="btn-save" onclick="saveJob()">保存</button>
   </div>
   <datalist id="dl-company"></datalist>
   <datalist id="dl-position"></datalist>
   <datalist id="dl-location"></datalist>
   <datalist id="dl-source"></datalist>
+  <datalist id="dl-tags"></datalist>
 </dialog>
 
 <script>
 const dlg = document.getElementById('dlg');
-let STATUSES = [], editingId = null;
+let STATUSES = [], CATEGORIES = [], editingId = null, editingBase = '';
+const selectedTags = new Set();   // 已勾选的标签，多个取 AND
+let loadSeq = 0, searchTimer = null;
 
+// 筛选控件 → 查询参数的对应关系
+const FILTERS = [['f-category','category'], ['f-company','company'], ['f-location','location'],
+                 ['f-position','position'], ['f-source','source'], ['f-status','status'],
+                 ['f-deadline','deadline_before'], ['f-q','q']];
+
+// 统一请求封装：先判 HTTP 状态再解析，网络层失败也要提示。
+// 服务端异常时连接可能被直接关闭，不兜住的话用户看到的是「点了没反应」。
 async function api(path, opts) {
-  const r = await fetch(path, opts ? {
-    method: opts.method || 'POST',
-    headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify(opts.body || {})
-  } : undefined);
-  const d = await r.json();
-  if (!r.ok) { alert(d.error || r.statusText); throw new Error(d.error); }
+  let r;
+  try {
+    r = await fetch(path, opts ? {
+      method: opts.method || 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(opts.body || {})
+    } : undefined);
+  } catch (e) {
+    alert('请求没能送达服务器：' + e.message + '\n\n服务器可能已经停了，检查一下终端。');
+    throw e;
+  }
+  let d;
+  try { d = await r.json(); }
+  catch (e) {
+    alert(`服务器返回了无法解析的内容（HTTP ${r.status}）。详情看终端输出。`);
+    throw e;
+  }
+  if (!r.ok) {
+    if (opts && opts.quiet409 && r.status === 409) return d;   // 冲突由调用方自己处理
+    alert(d.error || `请求失败（HTTP ${r.status}）`);
+    throw new Error(d.error || r.statusText);
+  }
   return d;
 }
 
@@ -190,98 +248,194 @@ function showTab(t) {
   if (t === 'cv') loadCV();
 }
 
-function esc(s) { return (s || '').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
+// 转义 HTML 特殊字符。单引号也要转 —— 状态值可能来自手改的文件或合作者的 JSON
+function esc(s) {
+  return (s == null ? '' : String(s)).replace(/[&<>"']/g,
+    c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
 
-// 重建下拉选项但保留当前选中
+function notice(text) {
+  const box = document.getElementById('notice');
+  box.textContent = text || '';
+  box.hidden = !text;
+}
+
+// 重建下拉选项但保留当前选中；当前值不在候选里时补一个临时项，避免选中态被抹掉
 function setOptions(sel, values, allLabel) {
   const cur = sel.value;
+  const list = cur && !values.includes(cur) ? [...values, cur] : values;
   sel.innerHTML = `<option value="">${allLabel}</option>` +
-    values.map(v => `<option value="${esc(v)}">${esc(v)}</option>`).join('');
+    list.map(v => `<option value="${esc(v)}">${esc(v)}</option>`).join('');
   sel.value = cur;
 }
 
+function setDatalist(id, values) {
+  document.getElementById(id).innerHTML = values.map(v => `<option value="${esc(v)}">`).join('');
+}
+
 function clearFilters() {
-  for (const id of ['f-status', 'f-company', 'f-location', 'f-position'])
-    document.getElementById(id).value = '';
-  document.getElementById('f-deadline').value = '';
-  document.getElementById('f-q').value = '';
+  for (const [id] of FILTERS) document.getElementById(id).value = '';
+  selectedTags.clear();
+  document.getElementById('f-archived').checked = true;
   loadJobs();
+}
+
+function toggleTag(t) {
+  selectedTags.has(t) ? selectedTags.delete(t) : selectedTags.add(t);
+  loadJobs();
+}
+
+// 搜索框防抖：每敲一个字发一次请求会让慢响应后发先至，把列表停在旧前缀的结果上
+function onSearchInput() {
+  clearTimeout(searchTimer);
+  searchTimer = setTimeout(loadJobs, 200);
+}
+
+// 标签筛选条：已选中但当前结果里不存在的标签也要保留，否则取消不掉
+function renderTagbar(tags) {
+  const all = [...new Set([...tags, ...selectedTags])].sort();
+  document.getElementById('tagbar').innerHTML = all.length
+    ? '<span class="muted">标签</span>' + all.map(t =>
+        `<span class="tag-pick ${selectedTags.has(t) ? 'on' : ''}" data-t="${esc(t)}"
+               onclick="toggleTag(this.dataset.t)">${esc(t)}</span>`).join('')
+      + (selectedTags.size ? ` <span class="muted">（多选＝同时具备）</span>` : '')
+    : '';
 }
 
 async function loadJobs() {
   const params = new URLSearchParams();
-  for (const [id, key] of [['f-status','status'], ['f-company','company'],
-                           ['f-location','location'], ['f-position','position'],
-                           ['f-deadline','deadline_before'], ['f-q','q']]) {
+  for (const [id, key] of FILTERS) {
     const v = document.getElementById(id).value.trim();
     if (v) params.set(key, v);
   }
+  for (const t of selectedTags) params.append('tag', t);
+  if (document.getElementById('f-archived').checked) params.set('hide_archived', '1');
+
+  const seq = ++loadSeq;
   const d = await api('/api/jobs?' + params);
+  if (seq !== loadSeq) return;     // 已经有更新的请求发出去了，丢弃这次的过期结果
+
   STATUSES = d.statuses;
+  CATEGORIES = d.categories;
   setOptions(document.getElementById('f-status'), d.statuses, '全部状态');
-  setOptions(document.getElementById('f-company'), d.facets.company, '全部公司');
-  setOptions(document.getElementById('f-location'), d.facets.location, '全部地点');
-  setOptions(document.getElementById('f-position'), d.facets.position, '全部岗位');
+  // 分类下拉用 facets（后端已把枚举和存量值合并），否则枚举外的存量岗位筛不出来
+  setOptions(document.getElementById('f-category'), d.facets.category, '全部分类');
+  for (const [id, key] of [['f-company','company'], ['f-location','location'],
+                           ['f-position','position'], ['f-source','source']])
+    setOptions(document.getElementById(id), d.facets[key], '全部' +
+      ({company:'公司', location:'地点', position:'岗位', source:'来源'})[key]);
+  renderTagbar(d.facets.tags);
   // 新增/编辑弹窗的输入建议（datalist 允许自由输入新值）
-  for (const k of ['company', 'position', 'location'])
-    document.getElementById('dl-' + k).innerHTML =
-      d.facets[k].map(v => `<option value="${esc(v)}">`).join('');
-  document.getElementById('dl-source').innerHTML =
-    ['官网', '牛客', '内推', 'Boss直聘', '实习僧', '猎头'].map(v => `<option value="${v}">`).join('');
+  for (const k of ['company', 'position', 'location']) setDatalist('dl-' + k, d.facets[k]);
+  setDatalist('dl-tags', d.facets.tags);
+  setDatalist('dl-source', [...new Set([...d.facets.source,
+    '官网', '牛客', '内推', 'Boss直聘', '实习僧', '猎头'])]);
   document.getElementById('count').textContent = `共 ${d.jobs.length} 条`;
+
   const today = new Date().toISOString().slice(0, 10);
   document.getElementById('rows').innerHTML = d.jobs.map(j => `
-    <tr onclick="openEdit('${j.id}')">
-      <td><strong>${esc(j.company)}</strong></td><td>${esc(j.position)}</td>
+    <tr onclick="openEdit('${encodeURIComponent(j.id)}')">
+      <td><strong>${esc(j.company)}</strong></td>
+      <td>${esc(j.position)}${j.tags.length ? `<br><span class="row-tags">${j.tags.map(esc).join(' · ')}</span>` : ''}</td>
+      <td>${j.category ? `<span class="cat">${esc(j.category)}</span>` : ''}</td>
       <td>${esc(j.location)}</td><td>${esc(j.salary)}</td>
-      <td><span class="badge st-${j.status}">${j.status}</span></td>
-      <td class="${j.deadline && j.deadline <= today && !['Offer','已拒绝','已归档'].includes(j.status) ? 'urgent' : ''}">${j.deadline || ''}</td>
-      <td class="muted">${(j.updated_at || '').slice(5)}</td>
+      <td><span class="badge st-${esc(j.status)}">${esc(j.status)}</span>
+        ${j.status_updated_at ? `<span class="sub-time">${esc(j.status_updated_at.slice(5))}</span>` : ''}</td>
+      <td class="${j.deadline && j.deadline <= today && !['Offer','已拒绝','已归档'].includes(j.status) ? 'urgent' : ''}">${esc(j.deadline)}</td>
+      <td class="muted">${esc((j.updated_at || '').slice(5))}</td>
       <td onclick="event.stopPropagation()">
-        <select onchange="quickStatus('${j.id}', this.value)">
+        <select onchange="quickStatus('${encodeURIComponent(j.id)}', this.value)">
           <option value="">改状态…</option>
-          ${d.statuses.map(s => `<option ${s === j.status ? 'disabled' : ''}>${s}</option>`).join('')}
+          ${d.statuses.map(s => `<option ${s === j.status ? 'disabled' : ''}>${esc(s)}</option>`).join('')}
         </select>
       </td>
-    </tr>`).join('') || '<tr><td colspan="8"><div class="empty">暂无岗位，点「＋ 新增岗位」开始</div></td></tr>';
+    </tr>`).join('') || '<tr><td colspan="9"><div class="empty">没有符合条件的岗位</div></td></tr>';
 }
 
 async function quickStatus(id, status) {
   if (!status) return;
-  await api(`/api/jobs/${encodeURIComponent(id)}/status`, {body: {status}});
+  await api(`/api/jobs/${id}/status`, {body: {status}});   // 只写本地，不产生 git diff
   loadJobs();
+}
+
+// 把 reindex / sync 报出来的跳过与告警显示成常驻提示条，别用 alert 一闪而过
+function showReport(d, prefix) {
+  const lines = [...(d.skipped || []).map(x => '⚠️ 跳过 ' + x),
+                 ...(d.warnings || []).map(x => '⚠️ ' + x)];
+  notice(lines.length ? `${prefix}，但有 ${lines.length} 个文件需要你处理：\n` + lines.join('\n') : '');
+  return lines.length;
 }
 
 async function reindex() {
   const d = await api('/api/reindex', {body: {}});
-  alert(`索引已重建：${d.count} 条岗位`);
+  if (!showReport(d, `索引已重建：${d.count} 条岗位`)) alert(`索引已重建：${d.count} 条岗位`);
   loadJobs();
 }
 
+async function syncRepo() {
+  const d = await api('/api/sync', {body: {}});
+  if (!d.ok) { notice('⚠️ 同步失败：\n' + d.message); alert('同步失败，详情见页面顶部提示。'); return; }
+  showReport(d, `已拉取合作者数据：${d.count} 条岗位`);
+  alert(`已拉取合作者数据，现共 ${d.count} 条岗位。\n` +
+        `注意：这只是「拉取」，你自己新增的岗位还没有推送给别人。\n\n${d.message}`);
+  loadJobs();
+}
+
+const SHARED_INPUTS = ['company','position','url','location','salary','source','deadline','notes','jd'];
+
+// 让 select 能装下枚举外的存量值：不补这个临时项的话，读回来是空串，
+// 一保存就把合作者写的分类/状态抹掉了
+function fillSelect(sel, values, current, emptyLabel) {
+  const list = [...values];
+  const cur = current || '';
+  if (cur && !list.includes(cur)) list.push(cur);
+  sel.innerHTML = (emptyLabel === null ? '' : `<option value="">${emptyLabel}</option>`) +
+    list.map(v => `<option value="${esc(v)}"${values.includes(v) ? '' : ' data-extra="1"'}>` +
+                  `${esc(v)}${values.includes(v) ? '' : '（本版本枚举外，保留原值）'}</option>`).join('');
+  sel.value = cur;
+}
+
 async function openEdit(id) {
+  if (!STATUSES.length) await loadJobs();   // 首屏还没返回就点开的话，枚举是空的
   editingId = id;
-  const sel = document.getElementById('e-status');
-  sel.innerHTML = STATUSES.map(s => `<option>${s}</option>`).join('');
   document.getElementById('dlg-title').textContent = id ? '编辑岗位' : '新增岗位';
   let j = {};
-  if (id) j = await api(`/api/jobs/${encodeURIComponent(id)}`);
-  for (const k of ['company','position','url','location','salary','source','deadline','notes','jd'])
-    document.getElementById('e-' + k).value = j[k] || '';
-  sel.value = j.status || '待投递';
+  if (id) j = await api(`/api/jobs/${id}`);
+  editingBase = j._rev || '';           // 乐观锁基线：保存时回传，对不上就拒绝盲写
+  for (const k of SHARED_INPUTS) document.getElementById('e-' + k).value = j[k] || '';
+  // 非 ISO 的截止日期（手写 JSON 里可能有）会被 date 控件直接清空，降级成文本框保住原值
+  const dl = document.getElementById('e-deadline');
+  dl.type = (!j.deadline || /^\d{4}-\d{2}-\d{2}$/.test(j.deadline)) ? 'date' : 'text';
+  dl.value = j.deadline || '';
+  fillSelect(document.getElementById('e-category'), CATEGORIES, j.category, '（未分类）');
+  fillSelect(document.getElementById('e-status'), STATUSES, j.status || '待投递', null);
+  document.getElementById('e-my_notes').value = j.my_notes || '';
   document.getElementById('e-tags').value = (j.tags || []).join(', ');
   dlg.showModal();
 }
 
 async function saveJob() {
-  const body = {};
-  for (const k of ['company','position','url','location','salary','source','deadline','notes','jd'])
-    body[k] = document.getElementById('e-' + k).value.trim();
-  body.status = document.getElementById('e-status').value;
-  body.tags = document.getElementById('e-tags').value.split(/[,，]/).map(s => s.trim()).filter(Boolean);
-  if (editingId) await api(`/api/jobs/${encodeURIComponent(editingId)}`, {method: 'PUT', body});
-  else await api('/api/jobs', {body});
-  dlg.close();
-  loadJobs();
+  const btn = document.getElementById('btn-save');
+  if (btn.disabled) return;            // 双击保存会多出一条重复岗位
+  btn.disabled = true;
+  try {
+    const body = {base_rev: editingBase};
+    for (const k of SHARED_INPUTS) body[k] = document.getElementById('e-' + k).value.trim();
+    body.category = document.getElementById('e-category').value;
+    body.tags = document.getElementById('e-tags').value.split(/[,，]/).map(s => s.trim()).filter(Boolean);
+    body.status = document.getElementById('e-status').value;
+    body.my_notes = document.getElementById('e-my_notes').value.trim();
+    if (editingId) {
+      const d = await api(`/api/jobs/${editingId}`, {method: 'PUT', body, quiet409: true});
+      if (d.conflict) { alert(d.error); return; }   // 弹窗不关，用户的输入还在
+    } else {
+      await api('/api/jobs', {body});
+    }
+    dlg.close();
+    loadJobs();
+  } finally {
+    btn.disabled = false;
+  }
 }
 
 /* ---- CV ---- */
@@ -306,9 +460,19 @@ function renderMd(md) {
   return out.join('');
 }
 
-// 去掉「## 关键词」小节（已用标签云展示，避免重复）
+// 去掉「## 关键词」小节（已用标签云展示，避免重复）。
+// 规则要和后端 parse_keywords 一致：取小节后第一个非空行，不能用字符类去截，
+// 否则「C#」这种关键词会让整行留在正文里。
 function stripKeywords(md) {
-  return md.replace(/^##\s*关键词[^\n]*\n+(?:[^\n#]+\n+)?/m, '');
+  const lines = md.split('\n');
+  for (let i = 0; i < lines.length; i++) {
+    if (!/^##\s*关键词/.test(lines[i])) continue;
+    let j = i + 1;
+    while (j < lines.length && !lines[j].trim()) j++;
+    const end = (j < lines.length && !lines[j].trim().startsWith('#')) ? j + 1 : i + 1;
+    return [...lines.slice(0, i), ...lines.slice(end)].join('\n');
+  }
+  return md;
 }
 
 async function loadCV() {
