@@ -99,6 +99,7 @@ def frontend_body(job, **override):
     body["recruit_type"] = job.get("recruit_type") or ""
     body["locations"] = list(job.get("locations") or [])
     body["tags"] = list(job.get("tags") or [])
+    body["closed"] = bool(job.get("closed"))
     body["status"] = job.get("status") or "待投递"
     body["my_notes"] = job.get("my_notes") or ""
     body["base_rev"] = job.get("_rev") or ""
@@ -542,6 +543,216 @@ check(not (TMP / "jobs" / "待升级岗.json").exists(), "旧文件已改名")
 server.reindex()
 _, up = req("GET", f"/api/jobs/{U(new_id)}")
 check(up["status"] == "笔试", "改名后投递进度没丢（个人状态的键跟着搬了）")
+
+# ---- 15. 投递时间线 ----------------------------------------------------------
+print("\n【15】投递时间线")
+tl = add(company="时间线公司", position="时间线岗位")
+_, t0 = req("GET", f"/api/jobs/{U(tl)}")
+check(t0["history"] == [] and t0["applied_at"] == "", "新岗位没有时间线，也没有投递时间")
+for st in ["已投递", "笔试", "面试"]:
+    req("POST", f"/api/jobs/{U(tl)}/status", {"status": st})
+_, t1 = req("GET", f"/api/jobs/{U(tl)}")
+check([h["status"] for h in t1["history"]] == ["已投递", "笔试", "面试"],
+      "每次状态变更按顺序记进时间线")
+check(all(len(h.get("at", "")) == 16 for h in t1["history"]), "每条都带到分钟的时间戳")
+check(t1["applied_at"] == t1["history"][0]["at"], "applied_at 取首次「已投递」的时间")
+
+req("POST", f"/api/jobs/{U(tl)}/status", {"status": "面试"})
+_, t2 = req("GET", f"/api/jobs/{U(tl)}")
+check(len(t2["history"]) == 3, "状态没变时不追加历史（重复点同一个状态不该刷屏）")
+req("PUT", f"/api/jobs/{U(tl)}", frontend_body(t2, my_notes="改个备注"))
+_, t3 = req("GET", f"/api/jobs/{U(tl)}")
+check(len(t3["history"]) == 3, "只改备注不写时间线")
+check(t3["applied_at"] == t1["applied_at"], "后续状态变化不会把 applied_at 往后挪")
+
+req("POST", f"/api/jobs/{U(tl)}/status", {"status": "已归档"})
+_, t4 = req("GET", f"/api/jobs/{U(tl)}")
+check(t4["applied_at"] == t1["applied_at"], "归档不影响「投出去的时间」")
+
+# 时间线是个人层的东西，不能进 git
+before = (TMP / "jobs" / f"{tl}.json").read_text(encoding="utf-8")
+req("POST", f"/api/jobs/{U(tl)}/status", {"status": "Offer"})
+check((TMP / "jobs" / f"{tl}.json").read_text(encoding="utf-8") == before,
+      "时间线只写 local/，共享 JSON 一个字节都没变")
+
+# 老记录（只有 status 没有 history）要补出起点
+with server.local_lock():
+    tbl = json.loads((TMP / "local" / "status.json").read_text(encoding="utf-8"))
+    tbl["老记录"] = {"status": "面试", "updated_at": "2026-02-01 09:00"}
+    (TMP / "local" / "status.json").write_text(json.dumps(tbl, ensure_ascii=False), encoding="utf-8")
+check(server.migrate_local() == 1, "老的个人记录被补上时间线起点")
+tbl = json.loads((TMP / "local" / "status.json").read_text(encoding="utf-8"))
+check(tbl["老记录"]["history"] == [{"status": "面试", "at": "2026-02-01 09:00"}],
+      "起点用记录里原有的时间，不是「现在」")
+check(server.migrate_local() == 0, "再跑一次不重复补（幂等）")
+
+# 上限：状态被反复改也不能把个人文件撑爆
+for i in range(60):
+    server.update_local("压测岗", {"status": "已投递" if i % 2 else "待投递"})
+check(len(json.loads((TMP / "local" / "status.json").read_text(
+      encoding="utf-8"))["压测岗"]["history"]) == server.HISTORY_MAX,
+      f"时间线最多保留 {server.HISTORY_MAX} 条")
+
+# ---- 16. 岗位下架标记 --------------------------------------------------------
+print("\n【16】岗位下架标记（共享层）")
+alive = add(company="下架公司", position="还开着的岗")
+gone = add(company="下架公司", position="已经没了的岗")
+_, g0 = req("GET", f"/api/jobs/{U(gone)}")
+req("PUT", f"/api/jobs/{U(gone)}", frontend_body(g0, closed=True))
+raw_gone = json.loads((TMP / "jobs" / f"{gone}.json").read_text(encoding="utf-8"))
+check(raw_gone.get("closed") is True, "下架标记写进共享 JSON（合作者也能看到）")
+check("closed" not in json.loads(
+      (TMP / "jobs" / f"{alive}.json").read_text(encoding="utf-8")),
+      "没下架的岗位不写 closed:false —— 不给每个文件都加一行 git 噪音")
+
+# 下架 → 取消下架：文件里不能留下 "closed": false 这行残渣。
+# 单测只覆盖「从没下架过」是不够的，这条路径要走一遍才暴露得出来
+_, g_re = req("GET", f"/api/jobs/{U(gone)}")
+req("PUT", f"/api/jobs/{U(gone)}", frontend_body(g_re, closed=False))
+check("closed" not in json.loads((TMP / "jobs" / f"{gone}.json").read_text(encoding="utf-8")),
+      "取消下架后字段被整个删掉，不留 closed:false")
+check(json.loads((TMP / "jobs" / f"{gone}.json").read_text(encoding="utf-8")).keys()
+      == json.loads((TMP / "jobs" / f"{alive}.json").read_text(encoding="utf-8")).keys(),
+      "下架再取消之后，和从没下架过的岗位字段集合完全一致（rev 才对得上）")
+req("PUT", f"/api/jobs/{U(gone)}", frontend_body(
+    req("GET", f"/api/jobs/{U(gone)}")[1], closed=True))     # 改回下架，继续后面的用例
+
+check(gone not in ids(query(hide_closed="1")), "默认隐藏已下架")
+check(gone in ids(query()), "不勾隐藏时能看到已下架")
+_, g1 = req("GET", f"/api/jobs/{U(gone)}")
+check(g1["closed"] is True, "单条接口返回布尔而不是字符串")
+
+# 「什么都没改就保存」不能把别人的下架标记冲掉，也不能凭空 bump updated_at
+sig = (TMP / "jobs" / f"{gone}.json").read_text(encoding="utf-8")
+code, noop = req("PUT", f"/api/jobs/{U(gone)}", frontend_body(g1))
+check(noop.get("shared_changed") is False, "原样回传不算改动（布尔按布尔比，不按字符串比）")
+check((TMP / "jobs" / f"{gone}.json").read_text(encoding="utf-8") == sig,
+      "no-op 保存不产生 git diff")
+
+# 手写 JSON 里的各种真值写法都要认
+write_raw("手写下架.json", {"id": "手写下架", "company": "手写公司", "position": "手写岗位",
+                          "closed": "是", "tags": [],
+                          "created_at": "2026-01-01 10:00", "updated_at": "2026-01-01 10:00"})
+req("POST", "/api/reindex")
+check("手写下架" not in ids(query(hide_closed="1")), "手写的 closed:「是」也认（norm_bool）")
+check(server.norm_bool("说不清") is False and server.norm_bool(None) is False,
+      "读不懂的值当作「没下架」——误判成下架会让岗位凭空消失")
+
+# 下架的岗位不该再出现在截止日期提醒里
+req("PUT", f"/api/jobs/{U(gone)}", frontend_body(
+    (req("GET", f"/api/jobs/{U(gone)}")[1]), deadline=server.now()[:10], closed=True))
+req("POST", "/api/reindex")
+st16 = query()["stats"]
+check(all(x["id"] != gone for x in st16["soon"] + st16["overdue"]),
+      "已下架的岗位不进截止提醒（它的 deadline 已经不重要了）")
+
+# ---- 17. CV 关键词匹配 -------------------------------------------------------
+print("\n【17】CV 关键词 × JD 匹配")
+(TMP / "cv").mkdir(exist_ok=True)
+(TMP / "cv" / "测试人.reading.md").write_text(
+    "# CV 解读：测试人\n## 关键词\n分子动力学、LLM 可解释性、PyTorch、量化交易\n## 匹配建议\n",
+    encoding="utf-8")
+server._KW_CACHE["sig"] = None          # 文件是刚写的，绕开 mtime 缓存
+check(server.cv_keywords() == ["分子动力学", "LLM 可解释性", "PyTorch", "量化交易"],
+      "解读文件里的关键词被读出来")
+
+hit3 = add(company="匹配公司", position="分子动力学算法研究员",
+           jd="需要熟悉 pytorch 与 LLM可解释性方向的研究经验")
+hit0 = add(company="匹配公司", position="行政专员", jd="负责会议室预定")
+req("POST", "/api/reindex")
+_, h3 = req("GET", f"/api/jobs/{U(hit3)}")
+check(sorted(h3["match_kw"]) == sorted(["分子动力学", "LLM 可解释性", "PyTorch"]),
+      "大小写不同（pytorch）、中英文之间少个空格（LLM可解释性）都算命中")
+check("量化交易" not in h3["match_kw"], "没出现的关键词不算命中，不做同义词发挥")
+rows = {j["id"]: j for j in query()["jobs"]}
+check(rows[hit3]["match_hits"] == 3 and rows[hit0]["match_hits"] == 0, "列表里带上命中个数")
+check(query(min_match="3") and hit3 in ids(query(min_match="3"))
+      and hit0 not in ids(query(min_match="3")), "匹配度门槛能筛掉不相关的岗位")
+
+# 个人笔记不参与匹配 —— 自己写的字反过来抬高匹配度是循环论证
+_, hz = req("GET", f"/api/jobs/{U(hit0)}")
+req("PUT", f"/api/jobs/{U(hit0)}", frontend_body(hz, my_notes="分子动力学 PyTorch 量化交易"))
+req("POST", "/api/reindex")
+check({j["id"]: j for j in query()["jobs"]}[hit0]["match_hits"] == 0,
+      "个人备注里的关键词不算匹配（否则自己写几个词就能把分数刷满）")
+
+# 鉴别力自检：把大小写/空格折叠退化掉，上面那条断言必须失败
+_orig_fold = server.fold
+server.fold = lambda x: (x or "")          # 退化：既不转小写也不去空格
+_degraded = server.match_keywords(
+    {"position": "分子动力学算法研究员", "jd": "需要熟悉 pytorch 与 LLM可解释性方向的研究经验"},
+    server.cv_keywords())
+server.fold = _orig_fold
+check(sorted(_degraded) != sorted(["分子动力学", "LLM 可解释性", "PyTorch"]),
+      "关掉大小写/空格折叠后命中结果确实变化 —— 说明上面那条断言真的在测东西")
+
+# 匹配度属于个人层，改 CV 不该动共享 JSON
+sig17 = (TMP / "jobs" / f"{hit3}.json").read_text(encoding="utf-8")
+(TMP / "cv" / "测试人.reading.md").write_text(
+    "# CV 解读：测试人\n## 关键词\n分子动力学\n## 匹配建议\n", encoding="utf-8")
+server._KW_CACHE["sig"] = None
+req("POST", "/api/reindex")
+check((TMP / "jobs" / f"{hit3}.json").read_text(encoding="utf-8") == sig17,
+      "改 CV 只影响索引，共享岗位 JSON 一个字节都没变")
+check({j["id"]: j for j in query()["jobs"]}[hit3]["match_hits"] == 1, "关键词变少后匹配度跟着降")
+
+# ---- 18. 截止日期提醒与排序 ---------------------------------------------------
+print("\n【18】截止日期提醒与排序")
+TODAY = server.now()[:10]
+def shift(k):
+    from datetime import datetime as _dt, timedelta as _td
+    return (_dt.strptime(TODAY, "%Y-%m-%d") + _td(days=k)).strftime("%Y-%m-%d")
+
+d_over = add(company="截止公司", position="过期岗", deadline=shift(-3))
+d_soon = add(company="截止公司", position="后天截止岗", deadline=shift(2))
+d_far  = add(company="截止公司", position="很久以后岗", deadline=shift(90))
+d_none = add(company="截止公司", position="没写截止岗")
+req("POST", "/api/reindex")
+st = query()["stats"]
+# 断言只针对本节新建的这几条 —— 前面的小节也往库里留了带截止日期的岗位，
+# 拿整个列表做全等比较是把无关数据也焊进了断言里
+soon_ids, over_ids = [x["id"] for x in st["soon"]], [x["id"] for x in st["overdue"]]
+check(st["today"] == TODAY, "提醒条用服务端的「今天」，不依赖浏览器时区")
+check(d_over in over_ids and d_over not in soon_ids, "过期的单独归一类")
+check(d_soon in soon_ids, f"{st['soon_days']} 天内截止的进提醒")
+check(d_far not in soon_ids + over_ids, "还早的不打扰")
+check(d_none not in soon_ids + over_ids, "没写截止日期的不进提醒")
+check(all(-x["days"] > 0 for x in st["overdue"]) and all(0 <= x["days"] <= st["soon_days"]
+      for x in st["soon"]), "两类的剩余天数各自落在正确区间")
+
+# 提醒不跟着筛选走：筛到别的公司也照样提醒
+st_f = query(company="匹配公司")["stats"]
+check([x["id"] for x in st_f["soon"]] == soon_ids
+      and [x["id"] for x in st_f["overdue"]] == over_ids,
+      "筛选之后提醒条内容不变（否则随手一筛提醒就消失了）")
+
+req("POST", f"/api/jobs/{U(d_soon)}/status", {"status": "Offer"})
+req("POST", "/api/reindex")
+check(all(x["id"] != d_soon for x in query()["stats"]["soon"]),
+      "拿到 Offer 之后不再催这条岗位的截止日期")
+check(d_soon in ids(query()), "但它本身还在列表里 —— 只是不再催而已")
+
+order = [j["id"] for j in query(sort="deadline")["jobs"] if j["company"] == "截止公司"]
+check(order.index(d_over) < order.index(d_far), "按截止排序：早的在前")
+check(order[-1] == d_none, "没写截止日期的排最后（是「不知道」，不是「不急」）")
+rows18 = {j["id"]: j for j in query()["jobs"]}
+check(rows18[d_over]["days_left"] == -3 and rows18[d_far]["days_left"] == 90,
+      "剩余天数由服务端算好")
+
+# 字符串比较的坑：未补零的日期会排错，norm_date 必须挡住
+write_raw("怪日期岗.json", {"id": "怪日期岗", "company": "怪公司", "position": "怪岗位",
+                          "deadline": "2026-9-1", "tags": [],
+                          "created_at": "2026-01-01 10:00", "updated_at": "2026-01-01 10:00"})
+req("POST", "/api/reindex")
+check({j["id"]: j for j in query()["jobs"]}["怪日期岗"]["deadline"] == "2026-09-01",
+      "非补零的日期入库时归一（否则 2026-9-1 > 2026-10-01）")
+
+# 排序参数走白名单，注入不了
+inj = query(sort="updated_at; DROP TABLE jobs--")
+check("jobs" in inj and len(inj["jobs"]) > 0, "认不出的 sort 退回默认排序，不执行注入")
+check([j["id"] for j in query(sort="match")["jobs"]][0] ==
+      max(query()["jobs"], key=lambda j: j["match_hits"])["id"],
+      "按匹配度排序：命中最多的排第一")
 
 SRV.shutdown()
 shutil.rmtree(TMP, ignore_errors=True)

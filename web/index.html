@@ -122,6 +122,42 @@
   .ext:hover { opacity: 1; text-decoration: none; }
   .warn { background: #fff8e6; border: 1.5px solid #f0d78c; color: #8a6d1f; border-radius: 14px;
           padding: 12px 16px; margin-bottom: 14px; font-size: 14px; white-space: pre-wrap; }
+
+  /* 截止提醒条。它统计的是全部岗位，不跟着筛选走 —— 筛到「深圳」时也该提醒
+     北京那个明天截止的，否则随手一筛提醒就没了，等于没有。 */
+  .due { background: #fff4f4; border: 1.5px solid #ffc9c9; color: #b02525; border-radius: 14px;
+         padding: 11px 16px; margin-bottom: 14px; font-size: 14px;
+         display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+  .due .btn { background: #e03131; box-shadow: none; }
+  .dl-days { display: block; font-size: 11.5px; margin-top: 2px; }
+  .dl-red { color: #e03131; font-weight: 700; }
+  .dl-orange { color: #e8590c; font-weight: 700; }
+  .dl-over { color: #adb5bd; }
+
+  /* CV 关键词匹配度 */
+  .mt { display: inline-flex; flex-direction: column; gap: 3px; min-width: 50px; }
+  .mt b { font-size: 13.5px; font-weight: 700; }
+  .mt i { display: block; height: 4px; border-radius: 3px; background: var(--line); }
+  .mt i s { display: block; height: 100%; border-radius: 3px; background: currentColor; }
+  table.no-cv .col-match { display: none; }   /* 没有 CV 解读文件时整列收起 */
+  .kw { display: inline-block; padding: 2px 11px; border-radius: 999px; font-size: 12.5px;
+        margin: 2px 4px 2px 0; background: #f1f3f5; color: #adb5bd; }
+  .kw.on { background: #d3f5e0; color: #1a7f45; font-weight: 700; }
+
+  /* 已下架：共享层的客观事实，和个人层的「已归档」不是一回事 */
+  tr.closed td { background: #fafafa; color: var(--muted); }
+  tr.closed .p-name { text-decoration: line-through; }
+  .off { display: inline-block; padding: 1px 8px; border-radius: 6px; font-size: 11.5px;
+         font-weight: 700; background: #f1f3f5; color: #868e96; margin-left: 6px; }
+
+  /* 投递时间线 */
+  .tl { margin: 0; padding: 0; list-style: none; align-self: start; }
+  .tl li { display: flex; gap: 10px; align-items: baseline; padding: 3px 0; font-size: 13.5px; }
+  .tl li .muted { font-size: 12.5px; }
+
+  .more-dot { display: inline-block; min-width: 17px; height: 17px; line-height: 17px;
+              text-align: center; border-radius: 999px; background: var(--accent); color: #fff;
+              font-size: 11px; font-weight: 700; margin-left: 5px; }
 </style>
 </head>
 <body>
@@ -134,29 +170,49 @@
 </header>
 <main>
   <section id="page-jobs">
+    <div id="due" class="due" hidden></div>
     <div id="notice" class="warn" hidden></div>
     <div class="toolbar">
       <button class="btn" onclick="openEdit(null)">＋ 新增岗位</button>
+      <input id="f-q" placeholder="🔍 关键词（含 JD / 标签 / 备注）" style="min-width:230px" oninput="onSearchInput()">
       <select id="f-category" onchange="loadJobs()"><option value="">全部分类</option></select>
       <select id="f-recruit_type" onchange="loadJobs()"><option value="">全部类型</option></select>
-      <select id="f-company" onchange="loadJobs()"><option value="">全部公司</option></select>
       <select id="f-location" onchange="loadJobs()"><option value="">全部地点</option></select>
+      <select id="f-status" onchange="loadJobs()"><option value="">全部状态</option></select>
+      <select id="f-sort" onchange="loadJobs()" title="排序方式">
+        <option value="updated">最近更新</option>
+        <option value="deadline">截止最近</option>
+        <option value="match">匹配度</option>
+        <option value="created">最近录入</option>
+        <option value="company">按公司</option>
+      </select>
+      <button class="btn ghost small" id="more-btn" onclick="toggleMore()">更多筛选 ▾</button>
+      <button class="btn ghost small" onclick="clearFilters()">清空</button>
+      <span class="muted" id="count"></span>
+      <span style="flex:1 1 auto"></span>
+      <button class="btn ghost small" onclick="reindex()" title="手动改了 jobs/*.json 或 cv/ 里的解读文件后点这里重算">↻ 重建索引</button>
+      <button class="btn ghost small" onclick="syncRepo()" title="git pull --rebase --autostash：只拉取，不推送你自己的改动">⇩ 拉取合作者数据</button>
+    </div>
+    <div class="toolbar" id="more-bar" hidden>
+      <select id="f-company" onchange="loadJobs()"><option value="">全部公司</option></select>
       <select id="f-position" onchange="loadJobs()"><option value="">全部岗位</option></select>
       <select id="f-source" onchange="loadJobs()"><option value="">全部来源</option></select>
-      <select id="f-status" onchange="loadJobs()"><option value="">全部状态</option></select>
       <label class="muted" for="f-deadline">截止 ≤</label>
       <input id="f-deadline" type="date" onchange="loadJobs()" title="只显示截止日期在此之前的岗位">
-      <input id="f-q" placeholder="🔍 关键词（含 JD / 标签 / 备注）" style="min-width:220px" oninput="onSearchInput()">
+      <label class="muted" for="f-min_match">匹配 ≥</label>
+      <select id="f-min_match" onchange="loadJobs()" title="至少命中这么多个 CV 关键词">
+        <option value="">不限</option><option value="3">3 个词</option>
+        <option value="5">5 个词</option><option value="7">7 个词</option>
+      </select>
       <label class="check muted"><input type="checkbox" id="f-archived" checked onchange="loadJobs()">隐藏已归档</label>
-      <button class="btn ghost small" onclick="clearFilters()">清空筛选</button>
-      <button class="btn ghost small" onclick="reindex()" title="手动改了 jobs/*.json 后点这里同步到索引">↻ 重建索引</button>
-      <button class="btn ghost small" onclick="syncRepo()" title="git pull --rebase --autostash：只拉取，不推送你自己的改动">⇩ 拉取合作者数据</button>
-      <span class="muted" id="count"></span>
+      <label class="check muted"><input type="checkbox" id="f-closed" checked onchange="loadJobs()">隐藏已下架</label>
     </div>
     <div class="tagbar" id="tagbar"></div>
-    <table>
+    <table id="tbl">
       <thead><tr>
-        <th>公司</th><th>岗位</th><th>分类</th><th>类型</th><th>工作地点</th><th>薪资</th>
+        <th>公司</th><th>岗位</th><th>分类 / 类型</th><th>工作地点</th>
+        <th class="col-match" title="岗位文本命中了几个 CV 关键词">匹配 <span class="local-mark">仅本机</span></th>
+        <th>薪资</th>
         <th>状态 <span class="local-mark">仅本机</span></th>
         <th>截止</th><th>更新</th><th>快捷状态</th>
       </tr></thead>
@@ -198,9 +254,16 @@
     <label>标签</label><input id="e-tags" list="dl-tags" placeholder="逗号分隔，如：AI4S, 校招">
     <label>公共备注</label><textarea id="e-notes" placeholder="对大家都有用的情报，如：内推码有效期到 9 月底、卡 985"></textarea>
     <label>JD 快照</label><textarea id="e-jd" style="min-height:130px" placeholder="粘贴 JD 原文，会被关键词搜索命中"></textarea>
+    <label>下架</label>
+    <label class="check">
+      <input type="checkbox" id="e-closed">岗位已下架 / 投递入口关闭
+      <span class="muted" style="margin-left:6px">合作者也会看到，省得再点一次链接确认</span>
+    </label>
 
     <div class="sec">🔒 我的进度 <span>— 只存在本机 local/status.json，不进 git</span></div>
+    <label>匹配</label><div id="e-match" class="muted">—</div>
     <label>状态</label><select id="e-status"></select>
+    <label>时间线</label><ul class="tl" id="e-timeline"></ul>
     <label>个人备注</label><textarea id="e-my_notes" placeholder="自己的投递记录，如：3.5 投的，等一周没回音"></textarea>
   </div>
   <div class="dlg-actions">
@@ -219,12 +282,19 @@ const dlg = document.getElementById('dlg');
 let STATUSES = [], CATEGORIES = [], RECRUIT_TYPES = [], editingId = null, editingBase = '';
 const selectedTags = new Set();   // 已勾选的标签，多个取 AND
 let loadSeq = 0, searchTimer = null;
+// CV 关键词总数、服务端认定的「今天」、快截止的天数口径。
+// 「今天」一律用服务端的：各机器时区不同，同一条岗位不该显示成不同的剩余天数。
+let CV_TOTAL = 0, CV_KEYWORDS = [], TODAY = '', DUE_DAYS = 7;
 
 // 筛选控件 → 查询参数的对应关系
 const FILTERS = [['f-category','category'], ['f-recruit_type','recruit_type'],
                  ['f-company','company'], ['f-location','location'],
                  ['f-position','position'], ['f-source','source'], ['f-status','status'],
-                 ['f-deadline','deadline_before'], ['f-q','q']];
+                 ['f-deadline','deadline_before'], ['f-min_match','min_match'],
+                 ['f-sort','sort'], ['f-q','q']];
+// 折叠进「更多筛选」的控件。它们收起来之后依然生效，所以按钮上必须标出有几条在起作用，
+// 否则会出现「明明录了这个岗位却搜不到」的困惑。
+const MORE_FILTERS = ['f-company', 'f-position', 'f-source', 'f-deadline', 'f-min_match'];
 
 // 城市配色：常见城市固定颜色（同一城市在任何页面都是同一色，方便扫视），
 // 其余按名字 hash 到备用色板，保证稳定不跳色。
@@ -243,6 +313,19 @@ function cityColor(c) {
 
 // 只放行 http(s)：url 来自共享 JSON，合作者可写，不能让 javascript: 之类进到 href
 function safeUrl(u) { return /^https?:\/\//i.test(u || '') ? u : ''; }
+
+// 两个 YYYY-MM-DD 相差几天。一律按 UTC 零点算，避免夏令时切换那两天算出 ±1。
+function daysBetween(a, b) {
+  if (!a || !b) return null;          // TODAY 还没拿到时不要算出 NaN 天
+  const x = Date.parse(a + 'T00:00:00Z'), y = Date.parse(b + 'T00:00:00Z');
+  return (isNaN(x) || isNaN(y)) ? null : Math.round((y - x) / 86400000);
+}
+function addDays(iso, k) {
+  const d = new Date(iso + 'T00:00:00Z');
+  if (isNaN(d)) return '';
+  d.setUTCDate(d.getUTCDate() + k);
+  return d.toISOString().slice(0, 10);
+}
 
 // 统一请求封装：先判 HTTP 状态再解析，网络层失败也要提示。
 // 服务端异常时连接可能被直接关闭，不兜住的话用户看到的是「点了没反应」。
@@ -306,11 +389,28 @@ function setDatalist(id, values) {
   document.getElementById(id).innerHTML = values.map(v => `<option value="${esc(v)}">`).join('');
 }
 
-function clearFilters() {
+function clearFilters(skipLoad) {
   for (const [id] of FILTERS) document.getElementById(id).value = '';
+  document.getElementById('f-sort').value = 'updated';   // 排序不是筛选，回到默认而不是空
   selectedTags.clear();
   document.getElementById('f-archived').checked = true;
-  loadJobs();
+  document.getElementById('f-closed').checked = true;
+  if (!skipLoad) loadJobs();
+}
+
+function showMore(on) {
+  document.getElementById('more-bar').hidden = !on;
+  updateMoreBadge();
+}
+function toggleMore() { showMore(document.getElementById('more-bar').hidden); }
+
+function updateMoreBadge() {
+  const hidden = document.getElementById('more-bar').hidden;
+  const n = MORE_FILTERS.filter(id => document.getElementById(id).value).length
+          + (document.getElementById('f-archived').checked ? 0 : 1)
+          + (document.getElementById('f-closed').checked ? 0 : 1);
+  document.getElementById('more-btn').innerHTML =
+    (hidden ? '更多筛选 ▾' : '收起筛选 ▴') + (n ? `<span class="more-dot">${n}</span>` : '');
 }
 
 function toggleTag(t) {
@@ -335,6 +435,61 @@ function renderTagbar(tags) {
     : '';
 }
 
+// 截止日期单元格：日期本身之外再给一句剩余天数，「2026-09-05」看不出急不急
+function dlCell(j) {
+  if (!j.deadline) return '';
+  const d = j.days_left;
+  // 已经不需要行动的岗位不标红：Offer 到手了还催你「今天截止」是噪音
+  const done = ['Offer', '已拒绝', '已归档'].includes(j.status) || j.closed;
+  let cls = '', txt = '';
+  if (d === null || d === undefined) txt = '';
+  else if (d < 0) { cls = 'dl-over'; txt = `已过期 ${-d} 天`; }
+  else if (d === 0) { cls = 'dl-red'; txt = '今天截止'; }
+  else if (d <= 3) { cls = 'dl-red'; txt = `剩 ${d} 天`; }
+  else if (d <= DUE_DAYS) { cls = 'dl-orange'; txt = `剩 ${d} 天`; }
+  else txt = `剩 ${d} 天`;
+  if (done && cls !== 'dl-over') cls = '';
+  return `${esc(j.deadline)}<span class="dl-days ${cls}">${esc(txt)}</span>`;
+}
+
+// 匹配度：命中数 / CV 关键词总数。鼠标悬停看命中了哪几个词 ——
+// 光给个分数没法判断该不该信它。
+function matchCell(j) {
+  if (!CV_TOTAL) return '<td class="col-match"></td>';
+  const h = j.match_hits || 0, kw = j.match_kw || [];
+  const col = h >= CV_TOTAL * 0.6 ? '#2f9e44' : h >= CV_TOTAL * 0.3 ? '#e8590c' : '#adb5bd';
+  const tip = h ? '命中：' + kw.join('、') : '没有命中任何 CV 关键词';
+  return `<td class="col-match"><span class="mt" style="color:${col}" title="${esc(tip)}">`
+       + `<b>${h}/${CV_TOTAL}</b><i><s style="width:${Math.round(h / CV_TOTAL * 100)}%"></s></i></span></td>`;
+}
+
+// 截止提醒条。统计口径见后端 deadline_stats：不受当前筛选影响。
+function renderDue(st) {
+  const box = document.getElementById('due');
+  const soon = st.soon || [], over = st.overdue || [];
+  if (!soon.length && !over.length) { box.hidden = true; return; }
+  const head = [];
+  if (soon.length) head.push(`<b>${soon.length}</b> 个岗位 ${st.soon_days} 天内截止`);
+  if (over.length) head.push(`<b>${over.length}</b> 个已过期还没处理`);
+  const all = [...soon, ...over];
+  const one = it => esc(`${it.company} ${it.position}（`)
+    + (it.days < 0 ? `过期 ${-it.days} 天` : it.days === 0 ? '今天' : `剩 ${it.days} 天`) + '）';
+  box.innerHTML = `<span>⏰ ${head.join(' · ')}：`
+    + all.slice(0, 3).map(one).join('；') + (all.length > 3 ? ' …' : '') + '</span>'
+    + `<button class="btn small" onclick="focusDue()">只看这些</button>`;
+  box.hidden = false;
+}
+
+// 「只看这些」：切到按截止排序 + 截止日期上限，把提醒条里那些岗位单独筛出来。
+// 已过期的也要留在结果里，所以只设上限不设下限。
+function focusDue() {
+  clearFilters(true);
+  document.getElementById('f-sort').value = 'deadline';
+  document.getElementById('f-deadline').value = addDays(TODAY, DUE_DAYS);
+  showMore(true);
+  loadJobs();
+}
+
 async function loadJobs() {
   const params = new URLSearchParams();
   for (const [id, key] of FILTERS) {
@@ -343,6 +498,7 @@ async function loadJobs() {
   }
   for (const t of selectedTags) params.append('tag', t);
   if (document.getElementById('f-archived').checked) params.set('hide_archived', '1');
+  if (document.getElementById('f-closed').checked) params.set('hide_closed', '1');
 
   const seq = ++loadSeq;
   const d = await api('/api/jobs?' + params);
@@ -351,6 +507,18 @@ async function loadJobs() {
   STATUSES = d.statuses;
   CATEGORIES = d.categories;
   RECRUIT_TYPES = d.recruit_types;
+  CV_KEYWORDS = d.cv_keywords || [];
+  CV_TOTAL = CV_KEYWORDS.length;
+  // 后端还跑着旧版本时 stats 是 undefined。直接点下去整个列表就白屏了，
+  // 而用户看到的只是「页面坏了」，完全猜不到原因是「server.py 没重启」。
+  const stats = d.stats || {today: '', soon: [], overdue: [], soon_days: 7, stale: true};
+  TODAY = stats.today;
+  DUE_DAYS = stats.soon_days;
+  document.getElementById('tbl').classList.toggle('no-cv', !CV_TOTAL);
+  renderDue(stats);
+  updateMoreBadge();
+  if (stats.stale) notice('⚠️ 网页是新版，但后台 server.py 还是旧的 —— '
+    + '截止提醒、匹配度、时间线都不会显示。到终端 Ctrl+C 停掉再重新运行一次即可。');
   setOptions(document.getElementById('f-status'), d.statuses, '全部状态');
   // 分类/类型下拉用 facets（后端已把枚举和存量值合并），否则枚举外的存量岗位筛不出来
   setOptions(document.getElementById('f-category'), d.facets.category, '全部分类');
@@ -368,23 +536,24 @@ async function loadJobs() {
     '官网', '牛客', '内推', 'Boss直聘', '实习僧', '猎头'])]);
   document.getElementById('count').textContent = `共 ${d.jobs.length} 条`;
 
-  const today = new Date().toISOString().slice(0, 10);
   document.getElementById('rows').innerHTML = d.jobs.map(j => `
-    <tr onclick="openEdit('${encodeURIComponent(j.id)}')">
+    <tr class="${j.closed ? 'closed' : ''}" onclick="openEdit('${encodeURIComponent(j.id)}')">
       <td><strong>${esc(j.company)}</strong>${safeUrl(j.url)
         ? `<a class="ext" href="${esc(safeUrl(j.url))}" target="_blank" rel="noopener"
               onclick="event.stopPropagation()" title="打开岗位页">↗</a>` : ''}</td>
-      <td>${esc(j.position)}${j.tags.length ? `<br><span class="row-tags">${j.tags.map(esc).join(' · ')}</span>` : ''}</td>
-      <td>${j.category ? `<span class="cat">${esc(j.category)}</span>` : ''}</td>
-      <td>${j.recruit_type ? `<span class="rt">${esc(j.recruit_type)}</span>` : ''}</td>
+      <td><span class="p-name">${esc(j.position)}</span>${j.closed ? '<span class="off">已下架</span>' : ''}
+        ${j.tags.length ? `<br><span class="row-tags">${j.tags.map(esc).join(' · ')}</span>` : ''}</td>
+      <td>${j.category ? `<span class="cat">${esc(j.category)}</span> ` : ''}${
+           j.recruit_type ? `<span class="rt">${esc(j.recruit_type)}</span>` : ''}</td>
       <td><div class="locs">${(j.locations || []).map(c => {
         const col = cityColor(c);
         return `<span class="loc" style="color:${col};background:${col}1a;border-color:${col}40">${esc(c)}</span>`;
       }).join('')}</div></td>
+      ${matchCell(j)}
       <td>${esc(j.salary)}</td>
       <td><span class="badge st-${esc(j.status)}">${esc(j.status)}</span>
         ${j.status_updated_at ? `<span class="sub-time">${esc(j.status_updated_at.slice(5))}</span>` : ''}</td>
-      <td class="${j.deadline && j.deadline <= today && !['Offer','已拒绝','已归档'].includes(j.status) ? 'urgent' : ''}">${esc(j.deadline)}</td>
+      <td>${dlCell(j)}</td>
       <td class="muted">${esc((j.updated_at || '').slice(5))}</td>
       <td onclick="event.stopPropagation()">
         <select onchange="quickStatus('${encodeURIComponent(j.id)}', this.value)">
@@ -392,7 +561,7 @@ async function loadJobs() {
           ${d.statuses.map(s => `<option ${s === j.status ? 'disabled' : ''}>${esc(s)}</option>`).join('')}
         </select>
       </td>
-    </tr>`).join('') || '<tr><td colspan="11"><div class="empty">没有符合条件的岗位</div></td></tr>';
+    </tr>`).join('') || '<tr><td colspan="10"><div class="empty">没有符合条件的岗位</div></td></tr>';
 }
 
 async function quickStatus(id, status) {
@@ -472,6 +641,9 @@ async function openEdit(id) {
   dl.type = (!j.deadline || /^\d{4}-\d{2}-\d{2}$/.test(j.deadline)) ? 'date' : 'text';
   dl.value = j.deadline || '';
   document.getElementById('e-locations').value = (j.locations || []).join(', ');
+  document.getElementById('e-closed').checked = !!j.closed;
+  renderMatch(j);
+  renderTimeline(j);
   fillSelect(document.getElementById('e-category'), CATEGORIES, j.category, '（未分类）');
   fillSelect(document.getElementById('e-recruit_type'), RECRUIT_TYPES, j.recruit_type, '（未标注）');
   fillSelect(document.getElementById('e-status'), STATUSES, j.status || '待投递', null);
@@ -492,6 +664,7 @@ async function saveJob() {
     const split = id => document.getElementById(id).value.split(/[,，]/).map(s => s.trim()).filter(Boolean);
     body.locations = split('e-locations');
     body.tags = split('e-tags');
+    body.closed = document.getElementById('e-closed').checked;
     body.status = document.getElementById('e-status').value;
     body.my_notes = document.getElementById('e-my_notes').value.trim();
     if (editingId) {
@@ -505,6 +678,43 @@ async function saveJob() {
   } finally {
     btn.disabled = false;
   }
+}
+
+// 弹窗里把 CV 的 10 个关键词全列出来，命中的高亮。
+// 只给「6/10」这个分数的话没法判断它算不算数 —— 命中的是「统计物理」还是
+// 「Python」，对要不要投这个岗位是完全不同的信息。
+function renderMatch(j) {
+  const box = document.getElementById('e-match');
+  const all = j.cv_keywords || CV_KEYWORDS, hit = j.match_kw || [];
+  if (!all.length) {
+    box.innerHTML = '<span class="muted">cv/ 里还没有 *.reading.md 解读文件，'
+                  + '无法计算匹配度。生成方法见「CV 与解读」页。</span>';
+    return;
+  }
+  box.innerHTML = `<b>${hit.length}/${all.length}</b> `
+    + all.map(k => `<span class="kw${hit.includes(k) ? ' on' : ''}">${esc(k)}</span>`).join('')
+    + `<div class="muted" style="margin-top:4px">按公司 / 岗位名 / 分类 / 标签 / 公共备注 / JD 全文匹配，`
+    + `忽略大小写与空格。改了 CV 解读文件要点一次「↻ 重建索引」才会更新。</div>`;
+}
+
+// 投递时间线：只记录状态**真正变化**的时刻，改备注不留痕。
+function renderTimeline(j) {
+  const box = document.getElementById('e-timeline');
+  const h = j.history || [];
+  if (!h.length) {
+    box.innerHTML = '<li class="muted">还没有状态变更记录 —— 改一次状态就会在这里留下时间点。</li>';
+    return;
+  }
+  const ago = at => {
+    const d = daysBetween((at || '').slice(0, 10), TODAY);
+    return d === null ? '' : d === 0 ? ' · 今天' : d === 1 ? ' · 昨天' : ` · ${d} 天前`;
+  };
+  box.innerHTML = h.map(x =>
+    `<li><span class="badge st-${esc(x.status)}">${esc(x.status)}</span>`
+    + `<span class="muted">${esc(x.at || '')}${esc(ago(x.at))}</span></li>`).join('')
+    + (j.applied_at
+        ? `<li class="muted">📮 投出去到今天：${daysBetween(j.applied_at.slice(0, 10), TODAY)} 天</li>`
+        : '');
 }
 
 /* ---- CV ---- */

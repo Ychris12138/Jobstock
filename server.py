@@ -144,7 +144,11 @@ KNOWN_CITIES = ["北京", "上海", "深圳", "杭州", "广州", "成都", "南
 # 共享字段 —— 写进 jobs/<id>.json，随 git 同步给所有人
 # locations 是数组：一个岗位常常多地可选，塞进单值字段会丢信息
 SHARED_FIELDS = ["company", "position", "job_no", "category", "recruit_type", "url",
-                 "locations", "salary", "source", "deadline", "tags", "notes", "jd"]
+                 "locations", "salary", "source", "deadline", "tags", "notes", "jd", "closed"]
+# 布尔字段。closed = 岗位已下架/关闭，属于共享信息：一个人发现投递入口没了，
+# 其他人就不必再点进去确认一次。它和「已归档」不是一回事 —— 归档是个人层的
+# 「我不投了」，下架是客观事实。
+BOOL_FIELDS = ["closed"]
 # 个人字段 —— 写进 local/status.json，只留在本机
 LOCAL_FIELDS = ["status", "my_notes"]
 # JSON 落盘的字段顺序：固定下来，多人协作时 git diff 才干净
@@ -152,13 +156,15 @@ JSON_ORDER = ["id"] + SHARED_FIELDS + ["created_at", "updated_at"]
 
 # sqlite 索引表的列。改这里不需要迁移脚本 —— reindex 会 DROP 重建整张表。
 INDEX_COLUMNS = ["id", "company", "position", "job_no", "category", "recruit_type", "locations",
-                 "salary", "source", "url", "deadline", "tags", "notes", "jd",
-                 "status", "my_notes", "status_updated_at", "updated_at", "created_at"]
+                 "salary", "source", "url", "deadline", "tags", "notes", "jd", "closed",
+                 "status", "my_notes", "status_updated_at", "applied_at",
+                 "match_hits", "match_kw", "updated_at", "created_at"]
 # 列表接口返回的列：不含 jd/notes 这类大字段，它们只参与关键词搜索。
 # url 要返回 —— 列表里的公司名是可以直接点开岗位页的外链。
 LIST_COLUMNS = ["id", "company", "position", "job_no", "category", "recruit_type", "locations",
-                "salary", "source", "url", "status", "deadline", "tags", "my_notes",
-                "status_updated_at", "updated_at", "created_at"]
+                "salary", "source", "url", "status", "deadline", "tags", "my_notes", "closed",
+                "status_updated_at", "applied_at", "match_hits", "match_kw",
+                "updated_at", "created_at"]
 # 单值维度：精确等值筛选（同一维度内多值取 OR）
 FILTER_COLUMNS = ["status", "company", "position", "category", "recruit_type", "source"]
 # 多值列：索引层存成逗号拼接串，筛选走整词匹配，facets 拆开统计
@@ -167,6 +173,29 @@ MULTI_COLUMNS = ["locations", "tags"]
 FACET_COLUMNS = ["company", "position", "category", "recruit_type", "source"]
 # 入库前需要 strip 的文本维度（查询侧也 strip，两边必须对称，否则永远筛不出来）
 STRIP_COLUMNS = ["company", "position", "job_no", "category", "recruit_type", "source", "status"]
+
+# 排序白名单。查询参数 sort 只能取这里的键 —— 直接把参数拼进 ORDER BY 是注入口子。
+# 每种排序都补足次级键：updated_at 只精确到分钟，光靠它同分钟的多条顺序不定。
+SORTS = {
+    "updated":  "updated_at DESC, created_at DESC, id",
+    # 没填截止日期的排最后：它们不是「最不急」，而是「不知道急不急」，
+    # 混在最前面会把真正快截止的挤下去
+    "deadline": "(deadline='') ASC, deadline ASC, updated_at DESC, id",
+    "match":    "CAST(match_hits AS INTEGER) DESC, deadline!='' DESC, deadline ASC, id",
+    "created":  "created_at DESC, id",
+    "company":  "company ASC, position ASC, id",
+}
+
+# 已经不需要再操心的投递状态：截止日期提醒会跳过它们
+DONE_STATUSES = ("已归档", "Offer", "已拒绝")
+
+# 投递时间线最多保留多少条。状态可以被反复改（点错了改回来），不设上限的话
+# 个人状态文件会被一条岗位的历史撑爆。
+HISTORY_MAX = 50
+
+# CV 关键词参与匹配的岗位字段。不含 my_notes —— 自己写的笔记里出现关键词是
+# 循环论证，会把匹配度刷高。
+MATCH_FIELDS = ["position", "category", "tags", "notes", "jd", "company"]
 
 CV_PROMPT = """请阅读我提供的 CV，生成一份「CV 解读文件」，保存为 cv/<名字>.reading.md，格式严格如下：
 
@@ -215,6 +244,37 @@ def norm_list(v):
     return out
 
 
+TRUE_WORDS = {"1", "true", "yes", "y", "是", "已下架", "已关闭", "closed"}
+
+
+def norm_bool(v):
+    """布尔字段归一：JSON 里手写成 true / "1" / "是" / "已下架" 都认。
+
+    只有明确为真才算真，读不懂的值一律当假 —— 把「下架」误判成真会让岗位从
+    默认列表里消失，比漏标严重得多。
+    """
+    if isinstance(v, bool):
+        return v
+    return norm_text(v).lower() in TRUE_WORDS
+
+
+def is_empty(v):
+    """字段是否「没填」。
+
+    不能直接写 `not v`：False 要算没填（未下架），但 0 和 "0" 是有意义的取值。
+    """
+    return v is None or v is False or v in ("", [], {})
+
+
+def fold(s):
+    """比对用的折叠形式：转小写 + 去掉所有空白。
+
+    「LLM 可解释性」和 JD 里的「LLM可解释性」应该算命中 —— 中英文之间加不加空格
+    纯属排版习惯，不该影响匹配结果。
+    """
+    return re.sub(r"\s+", "", (s or "")).lower()
+
+
 DATE_FORMATS = ("%Y-%m-%d", "%Y/%m/%d", "%Y.%m.%d", "%Y年%m月%d日")
 
 
@@ -259,8 +319,61 @@ def parse_keywords(content):
     return []
 
 
+_KW_CACHE = {"sig": None, "keywords": []}
+
+
+def cv_keywords():
+    """本机 cv/*.reading.md 里的关键词，合并去重。
+
+    CV 与解读文件不进 git，所以这份关键词天然是「本机这个人的」——
+    匹配度因此属于个人层，改 CV 不会产生任何 git diff，也不会影响合作者看到的数据。
+    按 (文件名, mtime, 大小) 缓存：整库重建索引时每条岗位都重读一遍文件没必要。
+    """
+    try:
+        files = sorted(f for f in CV_DIR.glob("*.reading.md") if f.is_file())
+        sig = tuple((f.name, f.stat().st_mtime_ns, f.stat().st_size) for f in files)
+    except OSError:
+        return _KW_CACHE["keywords"]
+    if sig == _KW_CACHE["sig"]:
+        return _KW_CACHE["keywords"]
+    out = []
+    for f in files:
+        try:
+            content = f.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        for k in parse_keywords(content):
+            if k not in out:
+                out.append(k)
+    _KW_CACHE["sig"], _KW_CACHE["keywords"] = sig, out
+    return out
+
+
+def match_keywords(job, keywords):
+    """CV 关键词 × 岗位文本，返回命中的关键词列表（保持 CV 里的原顺序）。
+
+    只做折叠空白与大小写后的子串匹配，不做分词、不做同义词扩展 —— 那类扩展会
+    造出说不清来源的命中，而这个数字是要拿来排序、拿来决定投不投的。
+    命中了哪几个词会一并展示，能不能算数由人自己判断。
+    """
+    parts = []
+    for k in MATCH_FIELDS:
+        v = job.get(k)
+        parts.append(",".join(norm_list(v)) if isinstance(v, (list, tuple)) else str(v or ""))
+    text = fold(" ".join(parts))
+    return [k for k in keywords if fold(k) and fold(k) in text]
+
+
 def now():
     return datetime.now().strftime("%Y-%m-%d %H:%M")
+
+
+def days_between(a, b):
+    """b - a 的天数（两个 YYYY-MM-DD 字符串）。任一无法解析返回 None。"""
+    try:
+        return (datetime.strptime(b, "%Y-%m-%d") - datetime.strptime(a, "%Y-%m-%d")).days
+    except (ValueError, TypeError):
+        return None
 
 
 def slugify(text):
@@ -350,9 +463,14 @@ def ordered_job(job):
     保留未知字段很重要：合作者可能跑着更新的版本、多写了几个字段，
     本机不该在改一次状态时把它们无声删掉。
     """
-    ordered = {k: job[k] for k in JSON_ORDER if k in job}
+    # 值为假的布尔字段不落盘：给每条岗位都写一行 "closed": false 只会制造 git 噪音，
+    # 而且「没有这个字段」和「字段为 false」本来就该是同一个意思。
+    # drop 必须同时挡住下面那个「保留未知字段」的循环 —— 否则刚丢掉的字段会被它加回来，
+    # 表现为「标记下架再取消，文件里就多出一行 closed: false」。
+    drop = {k for k in BOOL_FIELDS if k in job and not norm_bool(job[k])}
+    ordered = {k: job[k] for k in JSON_ORDER if k in job and k not in drop}
     for k, v in job.items():
-        if k not in ordered and k not in LOCAL_FIELDS:
+        if k not in ordered and k not in LOCAL_FIELDS and k not in drop:
             ordered[k] = v
     return ordered
 
@@ -375,6 +493,9 @@ def save_job(job):
     for k in MULTI_COLUMNS:
         if k in job:
             job[k] = norm_list(job[k])
+    for k in BOOL_FIELDS:
+        if k in job:
+            job[k] = norm_bool(job[k])
     write_json_atomic(p, ordered_job(job))
 
 
@@ -415,17 +536,67 @@ def load_local():
         return {}
 
 
+def clean_history(rec):
+    """取出记录里合法的时间线条目。手改坏一条不该让整个接口炸掉。"""
+    return [h for h in (rec.get("history") or [])
+            if isinstance(h, dict) and norm_text(h.get("status"))]
+
+
+def applied_at(rec):
+    """首次「投出去」的时间：时间线里第一条进度达到「已投递」及以后的记录。
+
+    从时间线派生而不是单独存一个字段 —— 两处存同一件事早晚会对不上。
+    """
+    for h in clean_history(rec):
+        if STATUS_RANK.get(norm_text(h.get("status")), -1) >= STATUS_RANK["已投递"]:
+            return norm_text(h.get("at"))
+    return ""
+
+
 def update_local(job_id, patch):
-    """原子更新单个岗位的个人状态。注意：不碰共享 JSON，因此不会产生 git diff。"""
+    """原子更新单个岗位的个人状态。注意：不碰共享 JSON，因此不会产生 git diff。
+
+    状态确实发生变化时往 history 追加一条，这就是投递时间线的唯一来源。
+    只改备注不写历史 —— 否则时间线会被无意义的重复条目淹没。
+    """
     with _LOCAL_LOCK, local_lock():
         table = read_local_strict()       # 损坏就抛错，绝不整表覆盖
         rec = table.get(job_id)
         rec = dict(rec) if isinstance(rec, dict) else {}
+        old = norm_text(rec.get("status")) or "待投递"
         rec.update(patch)
+        new = norm_text(rec.get("status")) or "待投递"
+        if new != old:
+            rec["history"] = (clean_history(rec) + [{"status": new, "at": now()}])[-HISTORY_MAX:]
         rec["updated_at"] = now()
         table[job_id] = rec
         write_json_atomic(local_path(), table)
         return rec
+
+
+def migrate_local():
+    """给还没有时间线的个人记录补一条起点，返回补了几条。
+
+    老版本只存 status + updated_at。用这两个值补出时间线的第一条，此后的变更
+    才有参照物。补出来的这条时间不精确（是最后一次改动的时间），但比空时间线有用。
+
+    ⚠️ 不要在 migrate() 的 with 块里调用它：local_lock() 是 flock，同一进程
+    对同一文件的第二个 fd 加锁会直接死锁（flock 按打开文件描述计，不认进程）。
+    """
+    seeded = 0
+    with _LOCAL_LOCK, local_lock():
+        table = read_local_strict()
+        for rec in table.values():
+            if not isinstance(rec, dict) or rec.get("history"):
+                continue
+            st = norm_text(rec.get("status"))
+            if not st or st == "待投递":     # 还没动过，没有历史可补
+                continue
+            rec["history"] = [{"status": st, "at": norm_text(rec.get("updated_at")) or now()}]
+            seeded += 1
+        if seeded:
+            write_json_atomic(local_path(), table)
+    return seeded
 
 
 def merge_local(job, table=None):
@@ -437,9 +608,12 @@ def merge_local(job, table=None):
     merged["_rev"] = job_rev(job)                 # 前端保存时回传，用于冲突检测
     for k in MULTI_COLUMNS:                       # 列表接口和单条接口的类型必须一致
         merged[k] = norm_list(job.get(k))
+    merged["closed"] = norm_bool(job.get("closed"))
     merged["status"] = rec.get("status") or "待投递"
     merged["my_notes"] = rec.get("my_notes", "")
     merged["status_updated_at"] = rec.get("updated_at", "")
+    merged["history"] = clean_history(rec)
+    merged["applied_at"] = applied_at(rec)
     return merged
 
 
@@ -517,6 +691,7 @@ def migrate():
             moved.append(jid)
         if local_dirty:
             write_json_atomic(local_path(), table)
+    migrate_local()      # 注意：在 with 块之外，flock 不可重入
     return moved
 
 
@@ -610,7 +785,7 @@ def find_duplicates():
 def _pick_survivor(jobs):
     """挑出重复组里要保留的那条：信息最全的；打平时取先录进来的。"""
     def filled(j):
-        return sum(1 for k in SHARED_FIELDS if j.get(k) not in (None, "", [], {}))
+        return sum(1 for k in SHARED_FIELDS if not is_empty(j.get(k)))
     return sorted(jobs, key=lambda j: (-filled(j), norm_text(j.get("created_at")) or "9999",
                                        j["id"]))[0]
 
@@ -633,6 +808,10 @@ def merge_group(ids):
         for k in SHARED_FIELDS:
             if k in MULTI_COLUMNS:
                 merged[k] = norm_list(list(merged.get(k) or []) + list(j.get(k) or []))
+            elif k in BOOL_FIELDS:
+                # 取或：只要有一个人标了下架，合并后就是下架。漏标的代价是白点一次
+                # 链接，误清标记的代价是继续把它当活岗位准备材料
+                merged[k] = norm_bool(merged.get(k)) or norm_bool(j.get(k))
             elif not norm_text(merged.get(k)) and norm_text(j.get(k)):
                 merged[k] = j[k]
             elif k == "notes" and norm_text(j.get(k)) and norm_text(j[k]) not in norm_text(merged.get(k)):
@@ -649,6 +828,16 @@ def merge_group(ids):
             rec = dict(best)
             if notes:
                 rec["my_notes"] = "\n".join(dict.fromkeys(notes))
+            # 时间线取并集按时间排序：两条记录各自投过一次，合并后应该看得到全过程
+            hist, seen_h = [], set()
+            for h in sorted((h for r in recs for h in clean_history(r)),
+                            key=lambda h: norm_text(h.get("at"))):
+                k = (norm_text(h.get("at")), norm_text(h.get("status")))
+                if k not in seen_h:
+                    seen_h.add(k)
+                    hist.append(h)
+            if hist:
+                rec["history"] = hist[-HISTORY_MAX:]
             table[keep["id"]] = rec
         for j in others:
             table.pop(j["id"], None)
@@ -705,13 +894,25 @@ def get_db():
     return conn
 
 
-def upsert_index(conn, merged):
-    """把「共享岗位 + 个人状态」的合并视图写进索引表，写入侧统一归一。"""
+def upsert_index(conn, merged, keywords=None):
+    """把「共享岗位 + 个人状态」的合并视图写进索引表，写入侧统一归一。
+
+    匹配度在这里算好存进索引，列表接口就不必每次重算。代价是改了 CV 之后要
+    重建一次索引才生效 —— 页面上的「↻ 重建索引」按钮就是干这个的。
+    """
+    kws = cv_keywords() if keywords is None else keywords
+    hits = match_keywords(merged, kws)
     row = []
     for c in INDEX_COLUMNS:
         v = merged.get(c, "")
         if c in MULTI_COLUMNS:
             v = ",".join(norm_list(v))
+        elif c in BOOL_FIELDS:
+            v = "1" if norm_bool(v) else ""
+        elif c == "match_hits":
+            v = str(len(hits))
+        elif c == "match_kw":
+            v = ",".join(hits)
         elif c == "deadline":
             v = norm_date(v)
         elif c in STRIP_COLUMNS:
@@ -740,6 +941,7 @@ def reindex():
     还是一句「索引已重建：N 条」。
     """
     table = load_local()
+    kws = cv_keywords()          # 整库重建时只读一次 CV，不必每条岗位都问一遍
     conn = get_db()
     skipped, warnings, seen = [], [], {}
     try:
@@ -764,12 +966,44 @@ def reindex():
             if job.get("category") and norm_text(job["category"]) not in CATEGORIES:
                 warnings.append(f"{f.name}：分类「{job['category']}」不在本版本枚举内，"
                                 f"已保留原值（筛选下拉里可以选到它）")
-            upsert_index(conn, merge_local(job, table))
+            upsert_index(conn, merge_local(job, table), kws)
         conn.commit()
     finally:
         conn.close()
     return {"count": len(seen), "skipped": skipped, "warnings": warnings,
-            "duplicates": find_duplicates()}
+            "cv_keywords": kws, "duplicates": find_duplicates()}
+
+
+DUE_SOON_DAYS = 7          # 「快截止了」的口径：今天起 7 天内（含第 7 天）
+
+
+def deadline_stats(conn, today=None):
+    """统计需要尽快处理的岗位，用于页面顶部的提醒条。
+
+    刻意**不受当前筛选条件影响**：筛到「深圳」时也该提醒北京那个明天截止的岗位，
+    否则提醒会随手一筛就消失，等于没有。
+
+    只看还需要行动的：已下架的、已归档 / 已 Offer / 已拒绝的都跳过 —— 它们的
+    截止日期已经不重要了。没填截止日期的不算，那是「不知道」而不是「不急」。
+    """
+    today = today or datetime.now().strftime("%Y-%m-%d")
+    rows = conn.execute(
+        "SELECT id, company, position, deadline, status FROM jobs "
+        f"WHERE deadline!='' AND closed='' AND status NOT IN ({','.join('?' * len(DONE_STATUSES))}) "
+        "ORDER BY deadline, id", list(DONE_STATUSES)).fetchall()
+    overdue, soon = [], []
+    for r in rows:
+        d = days_between(today, r["deadline"])
+        if d is None:
+            continue
+        item = {"id": r["id"], "company": r["company"], "position": r["position"],
+                "deadline": r["deadline"], "days": d}
+        if d < 0:
+            overdue.append(item)
+        elif d <= DUE_SOON_DAYS:
+            soon.append(item)
+    return {"today": today, "soon": soon, "overdue": overdue,
+            "soon_days": DUE_SOON_DAYS}
 
 
 def _like(s):
@@ -815,14 +1049,23 @@ def list_jobs(query):
     # 已归档默认收起来，除非用户显式筛「已归档」
     if one("hide_archived") == "1" and "已归档" not in vals("status"):
         sql += " AND status!='已归档'"
+    # 已下架的岗位同理默认收起来。它是共享层的客观事实，不是个人选择
+    if one("hide_closed") == "1":
+        sql += " AND closed=''"
+    # 匹配度门槛：match_hits 在索引里是 TEXT，必须 CAST，否则 '10' < '2' 是真
+    mm = one("min_match")
+    if mm.isdigit() and int(mm) > 0:
+        sql += " AND CAST(match_hits AS INTEGER)>=?"
+        args.append(int(mm))
     q = one("q")
     if q:
         cols = ["company", "position", "locations", "category", "recruit_type",
                 "tags", "notes", "jd", "my_notes"]
         sql += " AND (" + " OR ".join(f"{c} LIKE ? ESCAPE '\\'" for c in cols) + ")"
         args += [f"%{_like(q)}%"] * len(cols)
-    # 加次级排序键：updated_at 只精确到分钟，同分钟的多条否则顺序不定
-    sql += " ORDER BY updated_at DESC, created_at DESC, id"
+    # 排序键走白名单，认不出来的一律退回默认 —— 参数直接拼进 ORDER BY 是注入口子
+    sort = one("sort")
+    sql += " ORDER BY " + SORTS.get(sort, SORTS["updated"])
 
     conn = get_db()
     try:
@@ -837,16 +1080,24 @@ def list_jobs(query):
             for (v,) in conn.execute(f"SELECT {col} FROM jobs WHERE {col}!=''"):
                 vs.update(x for x in v.split(",") if x)
             facets[key] = sorted(vs)
+        stats = deadline_stats(conn)
     finally:
         conn.close()
     # 枚举外的存量取值也要能筛（比如合作者跑着更新的版本，加了新方向）
     for key, enum in (("category", CATEGORIES), ("recruit_type", RECRUIT_TYPES)):
         facets[key] = sorted(set(facets[key]) | set(enum),
                              key=lambda v: (v not in enum, enum.index(v) if v in enum else 0, v))
+    today = stats["today"]
     for r in rows:
         for k in MULTI_COLUMNS:
             r[k] = [x for x in (r.get(k) or "").split(",") if x]
-    return {"jobs": rows, "facets": facets}
+        r["match_kw"] = [x for x in (r.get("match_kw") or "").split(",") if x]
+        r["match_hits"] = int(r.get("match_hits") or 0)
+        r["closed"] = bool(r.get("closed"))
+        # 剩余天数在服务端算：前端各机器时区可能不同，同一条岗位不该显示成不同天数
+        r["days_left"] = days_between(today, r["deadline"]) if r.get("deadline") else None
+    return {"jobs": rows, "facets": facets, "stats": stats,
+            "sorts": list(SORTS), "cv_keywords": cv_keywords()}
 
 
 # ---------------------------------------------------------------- git 同步
@@ -1052,6 +1303,11 @@ class Handler(BaseHTTPRequestHandler):
             if k in MULTI_COLUMNS:
                 if norm_list(new) != norm_list(old):
                     out[k] = norm_list(new)
+            elif k in BOOL_FIELDS:
+                # 「字段不存在」和「字段为 false」是同一个意思，不能按字符串比 ——
+                # 那样每次保存都会把 closed:false 写进别人的文件
+                if norm_bool(new) != norm_bool(old):
+                    out[k] = norm_bool(new)
             elif (new or "") != (old or ""):
                 out[k] = new
         return out
@@ -1071,8 +1327,14 @@ class Handler(BaseHTTPRequestHandler):
         m = re.fullmatch(r"/api/jobs/([^/]+)", path)
         if m:
             job = load_shared(m.group(1))
-            return self.send_json(merge_local(job) if job else {"error": "not found"},
-                                  200 if job else 404)
+            if not job:
+                return self.send_json({"error": "not found"}, 404)
+            merged = merge_local(job)
+            kws = cv_keywords()
+            # 弹窗里要显示「命中了哪几个词」，光有个数说服不了人
+            merged["match_kw"] = match_keywords(merged, kws)
+            merged["cv_keywords"] = kws
+            return self.send_json(merged)
         if path == "/api/cv":
             CV_DIR.mkdir(parents=True, exist_ok=True)
             originals, readings = [], []
@@ -1142,8 +1404,13 @@ class Handler(BaseHTTPRequestHandler):
                 job = {"id": jid, "locations": [], "tags": [],
                        "created_at": now(), "updated_at": now()}
                 for k in SHARED_FIELDS:
-                    if k in data:
-                        job[k] = data[k]
+                    if k not in data:
+                        continue
+                    if k in BOOL_FIELDS:
+                        if norm_bool(data[k]):    # 假值不写进文件，见 ordered_job
+                            job[k] = True
+                        continue
+                    job[k] = data[k]
                 save_job(job)
             # 落盘要用归一值：校验走的是 norm_text，落盘若用原值，" 已归档 " 这种
             # 带空格的状态会造出一条既藏不掉也筛不出来的岗位
@@ -1232,6 +1499,9 @@ def main():
                  f"请检查 {CONFIG_PATH} 里的 data_dir，或先跑一次：python install.py")
 
     try:
+        # 时间线的补种在 migrate() 内部做，不要在这里再调一次 migrate_local()：
+        # 那既是死代码（migrate 已经调过），又会落在下面的 except 之外 ——
+        # 个人状态文件一坏，服务器就连岗位列表都打不开了
         moved = migrate()
     except LocalStateError as e:
         # 只读路径本来就能降级，不该因为写不了就连岗位列表都打不开
@@ -1244,6 +1514,11 @@ def main():
               f"地点改为多值字段；标签里的城市与招聘类型归位）")
 
     r = reindex()
+    if r.get("cv_keywords"):
+        print(f"CV 关键词（{len(r['cv_keywords'])} 个）已载入，列表里会显示每个岗位的匹配度："
+              f"{'、'.join(r['cv_keywords'])}")
+    else:
+        print("cv/ 里没有 *.reading.md，匹配度一栏不显示。生成方法见网页「CV 与解读」页。")
     for line in r["skipped"]:
         print(f"⚠️  跳过 {line}")
     for line in r["warnings"]:
@@ -1251,6 +1526,16 @@ def main():
     for g in r["duplicates"]:
         print(f"⚠️  疑似重复（{g['reason']}）：{' / '.join(g['ids'])}"
               f"{'  ← 可在网页点「合并重复」自动处理' if g['auto'] else '  ← 需人工确认'}")
+    conn = get_db()
+    try:
+        st = deadline_stats(conn)
+    finally:
+        conn.close()
+    for it in st["overdue"]:
+        print(f"⏰ 已过期 {-it['days']} 天：{it['company']} {it['position']}（{it['deadline']}）")
+    for it in st["soon"]:
+        when = "今天截止" if it["days"] == 0 else f"还剩 {it['days']} 天"
+        print(f"⏰ {when}：{it['company']} {it['position']}（{it['deadline']}）")
     if args.reindex:
         print(f"已重建索引：{r['count']} 条岗位（{JOBS_DIR}）")
         return
