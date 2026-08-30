@@ -21,10 +21,36 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
+CONFIG_PATH = ROOT / "config.json"
+WEB_DIR = ROOT / "web"
+
+# 数据位置：默认都在仓库内；可用 config.json 或 CLI 参数 --data-dir / --cv-dir 覆盖。
+# 数据目录结构：<data_dir>/jobs/*.json + <data_dir>/data/jobs.db
 JOBS_DIR = ROOT / "jobs"
 CV_DIR = ROOT / "cv"
 DB_PATH = ROOT / "data" / "jobs.db"
-WEB_DIR = ROOT / "web"
+
+
+def _resolve(p):
+    p = Path(p).expanduser()
+    return p if p.is_absolute() else (ROOT / p).resolve()
+
+
+def configure(data_dir=None, cv_dir=None):
+    """应用数据/CV 目录配置。优先级：CLI 参数 > config.json > 默认（仓库内）。"""
+    global JOBS_DIR, CV_DIR, DB_PATH
+    cfg = {}
+    if CONFIG_PATH.exists():
+        try:
+            cfg = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
+        except Exception:
+            pass
+    dd = data_dir or cfg.get("data_dir")
+    cd = cv_dir or cfg.get("cv_dir")
+    base = _resolve(dd) if dd else ROOT
+    JOBS_DIR = base / "jobs"
+    DB_PATH = base / "data" / "jobs.db"
+    CV_DIR = _resolve(cd) if cd else ROOT / "cv"
 
 STATUSES = ["待投递", "已投递", "笔试", "面试", "Offer", "已拒绝", "已归档"]
 FIELDS = ["company", "position", "url", "location", "salary", "source",
@@ -70,7 +96,7 @@ def slugify(text):
 
 
 def get_db():
-    DB_PATH.parent.mkdir(exist_ok=True)
+    DB_PATH.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
     conn.execute("""CREATE TABLE IF NOT EXISTS jobs (
@@ -88,7 +114,7 @@ def load_json(path):
 
 
 def save_job(job):
-    JOBS_DIR.mkdir(exist_ok=True)
+    JOBS_DIR.mkdir(parents=True, exist_ok=True)
     (JOBS_DIR / f"{job['id']}.json").write_text(
         json.dumps(job, ensure_ascii=False, indent=2), encoding="utf-8")
 
@@ -119,18 +145,28 @@ def reindex():
 
 def list_jobs(query):
     sql, args = "SELECT * FROM jobs WHERE 1=1", []
-    status = query.get("status", [""])[0]
+    for key in ("status", "company", "location", "position"):
+        v = query.get(key, [""])[0].strip()
+        if v:
+            sql += f" AND {key}=?"
+            args.append(v)
+    dl = query.get("deadline_before", [""])[0].strip()
+    if dl:
+        sql += " AND deadline!='' AND deadline<=?"
+        args.append(dl)
     q = query.get("q", [""])[0].strip()
-    if status:
-        sql += " AND status=?"; args.append(status)
     if q:
         sql += " AND (company LIKE ? OR position LIKE ? OR location LIKE ?)"
         args += [f"%{q}%"] * 3
     sql += " ORDER BY updated_at DESC"
     conn = get_db()
     rows = [dict(r) for r in conn.execute(sql, args).fetchall()]
+    # 已有取值（供前端筛选下拉与新增时的输入建议）
+    facets = {c: [r[0] for r in conn.execute(
+        f"SELECT DISTINCT {c} FROM jobs WHERE {c}!='' ORDER BY {c}")]
+        for c in ("company", "location", "position")}
     conn.close()
-    return rows
+    return {"jobs": rows, "facets": facets}
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -172,13 +208,14 @@ class Handler(BaseHTTPRequestHandler):
         if path in ("/", "/index.html"):
             return self.send_file(WEB_DIR / "index.html", "text/html; charset=utf-8")
         if path == "/api/jobs":
-            return self.send_json({"jobs": list_jobs(query), "statuses": STATUSES})
+            d = list_jobs(query)
+            return self.send_json({**d, "statuses": STATUSES})
         m = re.fullmatch(r"/api/jobs/([\w.-]+)", path)
         if m:
             job = load_json(JOBS_DIR / f"{m.group(1)}.json")
             return self.send_json(job or {"error": "not found"}, 200 if job else 404)
         if path == "/api/cv":
-            CV_DIR.mkdir(exist_ok=True)
+            CV_DIR.mkdir(parents=True, exist_ok=True)
             originals, readings = [], []
             for f in sorted(CV_DIR.iterdir()):
                 if not f.is_file() or f.name == "README.md":
@@ -257,10 +294,13 @@ class Handler(BaseHTTPRequestHandler):
 def main():
     ap = argparse.ArgumentParser(description="job-stock 服务器")
     ap.add_argument("--port", type=int, default=8770)
+    ap.add_argument("--data-dir", help="数据目录（内含 jobs/ 与 data/jobs.db），覆盖 config.json")
+    ap.add_argument("--cv-dir", help="CV 目录，覆盖 config.json")
     ap.add_argument("--reindex", action="store_true", help="只重建索引后退出")
     args = ap.parse_args()
+    configure(args.data_dir, args.cv_dir)
     if args.reindex:
-        print(f"已重建索引：{reindex()} 条岗位")
+        print(f"已重建索引：{reindex()} 条岗位（{JOBS_DIR}）")
         return
     n = reindex()
     try:
@@ -269,6 +309,7 @@ def main():
         print(f"端口 {args.port} 被占用，换个端口：python server.py --port 8771")
         sys.exit(1)
     print(f"job-stock 已启动：http://localhost:{args.port}  （索引 {n} 条岗位，Ctrl+C 停止）")
+    print(f"  数据目录：{JOBS_DIR.parent}\n  CV 目录：{CV_DIR}")
     srv.serve_forever()
 
 

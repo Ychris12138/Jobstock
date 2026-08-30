@@ -107,8 +107,14 @@
     <div class="toolbar">
       <button class="btn" onclick="openEdit(null)">＋ 新增岗位</button>
       <select id="f-status" onchange="loadJobs()"><option value="">全部状态</option></select>
-      <input id="f-q" placeholder="🔍 搜索公司 / 岗位 / 地点" oninput="loadJobs()" style="min-width:230px">
-      <button class="btn ghost" onclick="reindex()" title="AI 手动改了 jobs/*.json 后点这里同步">↻ 重建索引</button>
+      <select id="f-company" onchange="loadJobs()"><option value="">全部公司</option></select>
+      <select id="f-location" onchange="loadJobs()"><option value="">全部地点</option></select>
+      <select id="f-position" onchange="loadJobs()"><option value="">全部岗位</option></select>
+      <label class="muted" for="f-deadline">截止 ≤</label>
+      <input id="f-deadline" type="date" onchange="loadJobs()" title="只显示截止日期在此之前的岗位">
+      <input id="f-q" placeholder="🔍 关键词" oninput="loadJobs()">
+      <button class="btn ghost small" onclick="clearFilters()">清空筛选</button>
+      <button class="btn ghost small" onclick="reindex()" title="AI 手动改了 jobs/*.json 后点这里同步">↻ 重建索引</button>
       <span class="muted" id="count"></span>
     </div>
     <table>
@@ -139,12 +145,12 @@
 <dialog id="dlg">
   <h3 id="dlg-title" style="margin-top:0">新增岗位</h3>
   <div class="form-grid">
-    <label>公司 *</label><input id="e-company">
-    <label>岗位 *</label><input id="e-position">
+    <label>公司 *</label><input id="e-company" list="dl-company" placeholder="可选择已有，也可直接输入新公司">
+    <label>岗位 *</label><input id="e-position" list="dl-position" placeholder="可选择已有，也可直接输入新岗位">
     <label>链接</label><input id="e-url">
-    <label>地点</label><input id="e-location">
+    <label>地点</label><input id="e-location" list="dl-location" placeholder="可选择已有，也可直接输入新地点">
     <label>薪资</label><input id="e-salary">
-    <label>来源</label><input id="e-source" placeholder="官网 / 牛客 / 内推…">
+    <label>来源</label><input id="e-source" list="dl-source" placeholder="官网 / 牛客 / 内推…">
     <label>状态</label><select id="e-status"></select>
     <label>截止</label><input id="e-deadline" type="date">
     <label>标签</label><input id="e-tags" placeholder="逗号分隔，如：AI4S, 杭州">
@@ -155,6 +161,10 @@
     <button class="btn ghost" onclick="dlg.close()">取消</button>
     <button class="btn" onclick="saveJob()">保存</button>
   </div>
+  <datalist id="dl-company"></datalist>
+  <datalist id="dl-position"></datalist>
+  <datalist id="dl-location"></datalist>
+  <datalist id="dl-source"></datalist>
 </dialog>
 
 <script>
@@ -182,14 +192,42 @@ function showTab(t) {
 
 function esc(s) { return (s || '').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
 
+// 重建下拉选项但保留当前选中
+function setOptions(sel, values, allLabel) {
+  const cur = sel.value;
+  sel.innerHTML = `<option value="">${allLabel}</option>` +
+    values.map(v => `<option value="${esc(v)}">${esc(v)}</option>`).join('');
+  sel.value = cur;
+}
+
+function clearFilters() {
+  for (const id of ['f-status', 'f-company', 'f-location', 'f-position'])
+    document.getElementById(id).value = '';
+  document.getElementById('f-deadline').value = '';
+  document.getElementById('f-q').value = '';
+  loadJobs();
+}
+
 async function loadJobs() {
-  const st = document.getElementById('f-status').value;
-  const q = document.getElementById('f-q').value;
-  const d = await api(`/api/jobs?status=${encodeURIComponent(st)}&q=${encodeURIComponent(q)}`);
+  const params = new URLSearchParams();
+  for (const [id, key] of [['f-status','status'], ['f-company','company'],
+                           ['f-location','location'], ['f-position','position'],
+                           ['f-deadline','deadline_before'], ['f-q','q']]) {
+    const v = document.getElementById(id).value.trim();
+    if (v) params.set(key, v);
+  }
+  const d = await api('/api/jobs?' + params);
   STATUSES = d.statuses;
-  const sel = document.getElementById('f-status');
-  if (sel.options.length <= 1)
-    d.statuses.forEach(s => sel.insertAdjacentHTML('beforeend', `<option>${s}</option>`));
+  setOptions(document.getElementById('f-status'), d.statuses, '全部状态');
+  setOptions(document.getElementById('f-company'), d.facets.company, '全部公司');
+  setOptions(document.getElementById('f-location'), d.facets.location, '全部地点');
+  setOptions(document.getElementById('f-position'), d.facets.position, '全部岗位');
+  // 新增/编辑弹窗的输入建议（datalist 允许自由输入新值）
+  for (const k of ['company', 'position', 'location'])
+    document.getElementById('dl-' + k).innerHTML =
+      d.facets[k].map(v => `<option value="${esc(v)}">`).join('');
+  document.getElementById('dl-source').innerHTML =
+    ['官网', '牛客', '内推', 'Boss直聘', '实习僧', '猎头'].map(v => `<option value="${v}">`).join('');
   document.getElementById('count').textContent = `共 ${d.jobs.length} 条`;
   const today = new Date().toISOString().slice(0, 10);
   document.getElementById('rows').innerHTML = d.jobs.map(j => `

@@ -1,5 +1,6 @@
 __pycache__/
 *.pyc
+config.json
 data/*.db
 data/*.db-shm
 data/*.db-wal
