@@ -1,7 +1,15 @@
 __pycache__/
 *.pyc
 config.json
-data/*.db
-data/*.db-shm
-data/*.db-wal
+
+# sqlite 索引是派生数据，随时可重建。写成 **/ 是因为数据目录可能被配置到仓库子目录，
+# 而含斜杠的模式只锚定在本文件所在目录。
+**/data/*.db
+**/data/*.db-*
+
+# 个人投递状态：每人各自的进度，不参与共享
+local/
+
+# 原子写留下的临时文件
+*.tmp
 .DS_Store
