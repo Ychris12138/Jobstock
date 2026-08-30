@@ -1,0 +1,142 @@
+name: Release v0.1.0
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/release-v0.1.0.yml
+
+permissions:
+  contents: write
+
+jobs:
+  verify-and-release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.8
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.8'
+
+      - name: Syntax check
+        run: python -m py_compile server.py install.py
+
+      - name: Install and rebuild index
+        run: |
+          python install.py --yes
+          python server.py --reindex
+
+      - name: API smoke test
+        shell: bash
+        run: |
+          python server.py --port 8770 > /tmp/job-stock.log 2>&1 &
+          SERVER_PID=$!
+          trap 'kill $SERVER_PID || true' EXIT
+          python - <<'PY'
+          import json
+          import time
+          import urllib.error
+          import urllib.parse
+          import urllib.request
+
+          base = "http://127.0.0.1:8770"
+
+          def request(path, method="GET", body=None):
+              data = None if body is None else json.dumps(body, ensure_ascii=False).encode("utf-8")
+              req = urllib.request.Request(
+                  base + path,
+                  data=data,
+                  method=method,
+                  headers={"Content-Type": "application/json"},
+              )
+              with urllib.request.urlopen(req, timeout=5) as r:
+                  return r.status, json.loads(r.read().decode("utf-8"))
+
+          for _ in range(30):
+              try:
+                  status, payload = request("/api/jobs")
+                  if status == 200:
+                      break
+              except Exception:
+                  time.sleep(0.2)
+          else:
+              raise SystemExit("server did not start")
+
+          assert isinstance(payload.get("jobs"), list)
+          assert isinstance(payload.get("statuses"), list)
+          assert isinstance(payload.get("facets"), dict)
+
+          status, created = request("/api/jobs", "POST", {
+              "company": "ReleaseSmoke",
+              "position": "SmokeTest",
+              "location": "CI",
+              "source": "release-check",
+              "tags": ["smoke-test"],
+          })
+          assert status == 200 and created.get("id")
+          jid = created["id"]
+
+          q = urllib.parse.urlencode({"company": "ReleaseSmoke"})
+          status, listed = request("/api/jobs?" + q)
+          assert status == 200 and any(j["id"] == jid for j in listed["jobs"])
+
+          status, _ = request(f"/api/jobs/{jid}/status", "POST", {"status": "已投递"})
+          assert status == 200
+
+          status, one = request(f"/api/jobs/{jid}")
+          assert status == 200 and one["status"] == "已投递"
+          print("API smoke test passed")
+          PY
+
+      - name: Prepare release notes
+        run: |
+          cat > /tmp/release-notes.md <<'EOF'
+          ## job-stock v0.1.0
+
+          First public release of **job-stock** — a local-first, AI-native personal job tracker built around plain JSON and a zero-dependency WebUI.
+
+          ### Highlights
+          - Plain JSON files as the source of truth, designed for direct human and AI-agent editing.
+          - Rebuildable SQLite index for fast listing and filtering.
+          - Zero-dependency local WebUI powered by the Python standard library.
+          - Job lifecycle tracking: 待投递 / 已投递 / 笔试 / 面试 / Offer / 已拒绝 / 已归档.
+          - Search and multi-dimensional filters for company, location, position, status, and deadline.
+          - Reusable facets to keep job metadata naming consistent across human and agent edits.
+          - CV directory plus structured AI-generated CV reading files and keyword display.
+          - One-command setup with configurable job-data and CV directories.
+          - Windows and macOS launch scripts.
+
+          ### Requirements
+          - Python 3.8+
+          - GitHub CLI is recommended for the README installation flow.
+
+          ### Quick start
+          ```bash
+          gh repo clone Ychris12138/job-stock
+          cd job-stock
+          python install.py
+          python server.py
+          ```
+
+          Then open `http://localhost:8770`.
+
+          ### Notes
+          This is the first stable MVP release. The project intentionally keeps the architecture lightweight: JSON is the durable data layer, SQLite is a disposable index, and the WebUI is the human-facing view.
+          EOF
+
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release view v0.1.0 >/dev/null 2>&1; then
+            echo "v0.1.0 already exists; skipping release creation"
+          else
+            gh release create v0.1.0 \
+              --target 979c1bcc66e6fc17b1c2303514428fca4cfa285d \
+              --title "v0.1.0 — Initial Release" \
+              --notes-file /tmp/release-notes.md \
+              --latest
+          fi
