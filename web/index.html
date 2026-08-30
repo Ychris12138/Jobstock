@@ -1,0 +1,316 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>job-stock</title>
+<style>
+  :root {
+    --accent: #4f6df5; --accent-soft: #eef1fe; --ink: #1f2430; --muted: #8a8f9e;
+    --line: #eceef3; --bg: #f5f6fa; --card: #ffffff;
+    --shadow: 0 2px 10px rgba(31,36,48,.06), 0 8px 28px rgba(31,36,48,.05);
+  }
+  * { box-sizing: border-box; }
+  body { font-family: -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+         margin: 0; background: var(--bg); color: var(--ink); font-size: 15.5px; line-height: 1.6; }
+
+  /* 顶栏 */
+  header { background: linear-gradient(120deg, #4f6df5, #7b8cf9); padding: 18px 28px;
+           display: flex; align-items: center; gap: 26px; box-shadow: var(--shadow); }
+  header h1 { font-size: 21px; margin: 0; color: #fff; font-weight: 700; letter-spacing: .5px; }
+  nav { display: flex; gap: 10px; }
+  nav button { border: none; background: rgba(255,255,255,.16); color: #eef1fe; padding: 9px 22px;
+               border-radius: 999px; cursor: pointer; font-size: 15px; transition: .18s; }
+  nav button:hover { background: rgba(255,255,255,.28); }
+  nav button.active { background: #fff; color: var(--accent); font-weight: 700; }
+
+  main { padding: 26px 28px; max-width: 1180px; margin: 0 auto; }
+
+  /* 控件 */
+  .toolbar { display: flex; gap: 12px; margin-bottom: 18px; flex-wrap: wrap; align-items: center; }
+  input, select, textarea { padding: 10px 14px; border: 1.5px solid var(--line); border-radius: 12px;
+                            font-size: 14.5px; font-family: inherit; background: #fff; color: var(--ink);
+                            transition: border-color .15s, box-shadow .15s; }
+  input:focus, select:focus, textarea:focus { outline: none; border-color: var(--accent);
+                                              box-shadow: 0 0 0 3px var(--accent-soft); }
+  .btn { padding: 10px 22px; border: none; background: var(--accent); color: #fff;
+         border-radius: 999px; cursor: pointer; font-size: 14.5px; font-weight: 600;
+         box-shadow: 0 3px 10px rgba(79,109,245,.28); transition: .18s; }
+  .btn:hover { transform: translateY(-1px); box-shadow: 0 5px 14px rgba(79,109,245,.36); }
+  .btn.ghost { background: #fff; color: var(--accent); border: 1.5px solid var(--accent);
+               box-shadow: none; }
+  .btn.small { padding: 6px 14px; font-size: 13px; }
+
+  /* 表格 */
+  table { width: 100%; border-collapse: separate; border-spacing: 0; background: var(--card);
+          border-radius: 18px; overflow: hidden; box-shadow: var(--shadow); }
+  th, td { padding: 13px 16px; text-align: left; font-size: 14.5px; border-bottom: 1px solid var(--line); }
+  th { background: #fafbfe; color: var(--muted); font-weight: 600; font-size: 13.5px;
+       letter-spacing: .3px; }
+  tbody tr:last-child td { border-bottom: none; }
+  tbody tr { transition: background .15s; }
+  tbody tr:hover td { background: var(--accent-soft); cursor: pointer; }
+  .badge { display: inline-block; padding: 4px 14px; border-radius: 999px; font-size: 13px;
+           font-weight: 600; background: #eee; }
+  .st-待投递 { background:#eceef3; color:#5a6070; } .st-已投递 { background:#e0e9ff; color:#3b5bdb; }
+  .st-笔试 { background:#fff3d6; color:#b8860b; } .st-面试 { background:#ffe8c2; color:#c2660a; }
+  .st-Offer { background:#d3f5e0; color:#1a9e54; } .st-已拒绝 { background:#ffdfe0; color:#d64550; }
+  .st-已归档 { background:#f3f4f6; color:#a0a5b1; }
+  .urgent { color: #e03131; font-weight: 700; }
+
+  /* 弹窗 */
+  dialog { border: none; border-radius: 22px; padding: 28px 30px; width: 680px; max-width: 94vw;
+           max-height: 88vh; overflow-y: auto; box-shadow: 0 20px 60px rgba(31,36,48,.25); }
+  dialog::backdrop { background: rgba(31,36,48,.4); backdrop-filter: blur(2px); }
+  .form-grid { display: grid; grid-template-columns: 96px 1fr; gap: 12px 14px; align-items: center; }
+  .form-grid label { font-size: 14px; color: var(--muted); text-align: right; font-weight: 600; }
+  .form-grid textarea { min-height: 76px; resize: vertical; grid-column: 2; }
+  .dlg-actions { margin-top: 20px; display: flex; gap: 12px; justify-content: flex-end; }
+
+  /* 卡片 */
+  .card { background: var(--card); border-radius: 18px; padding: 22px 26px; box-shadow: var(--shadow);
+          margin-bottom: 20px; }
+  .card > h3 { margin: 0 0 12px; font-size: 16.5px; }
+  .muted { color: var(--muted); font-size: 13.5px; }
+  a { color: var(--accent); text-decoration: none; font-weight: 600; }
+  a:hover { text-decoration: underline; }
+
+  /* CV 解读 */
+  .chips { display: flex; flex-wrap: wrap; gap: 10px; margin: 6px 0 16px; }
+  .chip { padding: 7px 18px; border-radius: 999px; font-size: 14px; font-weight: 700;
+          background: linear-gradient(120deg, var(--accent-soft), #e6f0ff); color: var(--accent);
+          border: 1.5px solid #d5dffc; }
+  .reading-head { display: flex; align-items: baseline; justify-content: space-between;
+                  flex-wrap: wrap; gap: 8px; }
+  .md h2 { font-size: 17px; margin: 18px 0 8px; padding-bottom: 6px; border-bottom: 1.5px solid var(--line); }
+  .md h3 { font-size: 15.5px; margin: 14px 0 6px; }
+  .md p { margin: 8px 0; }
+  .md ul { margin: 8px 0; padding-left: 22px; }
+  .md li { margin: 4px 0; }
+  .md code { background: var(--accent-soft); padding: 2px 7px; border-radius: 7px; font-size: 13.5px; }
+  details.card summary { cursor: pointer; font-weight: 700; font-size: 15.5px; }
+  pre.prompt { white-space: pre-wrap; background: #f6f7fb; padding: 16px 18px; border-radius: 14px;
+               font-size: 13.5px; line-height: 1.7; margin: 12px 0 0; border: 1.5px solid var(--line); }
+  .empty { text-align: center; color: var(--muted); padding: 30px 0; font-size: 15px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>📦 job-stock</h1>
+  <nav>
+    <button id="tab-jobs" class="active" onclick="showTab('jobs')">岗位列表</button>
+    <button id="tab-cv" onclick="showTab('cv')">CV 与解读</button>
+  </nav>
+</header>
+<main>
+  <section id="page-jobs">
+    <div class="toolbar">
+      <button class="btn" onclick="openEdit(null)">＋ 新增岗位</button>
+      <select id="f-status" onchange="loadJobs()"><option value="">全部状态</option></select>
+      <input id="f-q" placeholder="🔍 搜索公司 / 岗位 / 地点" oninput="loadJobs()" style="min-width:230px">
+      <button class="btn ghost" onclick="reindex()" title="AI 手动改了 jobs/*.json 后点这里同步">↻ 重建索引</button>
+      <span class="muted" id="count"></span>
+    </div>
+    <table>
+      <thead><tr>
+        <th>公司</th><th>岗位</th><th>地点</th><th>薪资</th><th>状态</th>
+        <th>截止</th><th>更新</th><th>快捷状态</th>
+      </tr></thead>
+      <tbody id="rows"></tbody>
+    </table>
+  </section>
+
+  <section id="page-cv" hidden>
+    <div id="cv-readings"></div>
+    <div class="card">
+      <h3>📁 CV 原文件 <span class="muted">（放在 cv/ 目录下，点击下载）</span></h3>
+      <div id="cv-files" class="muted">加载中…</div>
+    </div>
+    <details class="card" id="prompt-card">
+      <summary>✨ 还没有解读？点这里复制提示词给 AI</summary>
+      <p class="muted">把下面的提示词连同你的 CV 一起发给 AI agent，它会生成符合格式的解读文件。
+        保存为 <code>cv/&lt;名字&gt;.reading.md</code> 后刷新本页即可看到上图那样的展示。</p>
+      <button class="btn ghost small" onclick="copyPrompt()">复制提示词</button>
+      <pre class="prompt" id="cv-prompt"></pre>
+    </details>
+  </section>
+</main>
+
+<dialog id="dlg">
+  <h3 id="dlg-title" style="margin-top:0">新增岗位</h3>
+  <div class="form-grid">
+    <label>公司 *</label><input id="e-company">
+    <label>岗位 *</label><input id="e-position">
+    <label>链接</label><input id="e-url">
+    <label>地点</label><input id="e-location">
+    <label>薪资</label><input id="e-salary">
+    <label>来源</label><input id="e-source" placeholder="官网 / 牛客 / 内推…">
+    <label>状态</label><select id="e-status"></select>
+    <label>截止</label><input id="e-deadline" type="date">
+    <label>标签</label><input id="e-tags" placeholder="逗号分隔，如：AI4S, 杭州">
+    <label>备注</label><textarea id="e-notes"></textarea>
+    <label>JD 快照</label><textarea id="e-jd" style="min-height:130px"></textarea>
+  </div>
+  <div class="dlg-actions">
+    <button class="btn ghost" onclick="dlg.close()">取消</button>
+    <button class="btn" onclick="saveJob()">保存</button>
+  </div>
+</dialog>
+
+<script>
+const dlg = document.getElementById('dlg');
+let STATUSES = [], editingId = null;
+
+async function api(path, opts) {
+  const r = await fetch(path, opts ? {
+    method: opts.method || 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify(opts.body || {})
+  } : undefined);
+  const d = await r.json();
+  if (!r.ok) { alert(d.error || r.statusText); throw new Error(d.error); }
+  return d;
+}
+
+function showTab(t) {
+  document.getElementById('page-jobs').hidden = t !== 'jobs';
+  document.getElementById('page-cv').hidden = t !== 'cv';
+  document.getElementById('tab-jobs').classList.toggle('active', t === 'jobs');
+  document.getElementById('tab-cv').classList.toggle('active', t === 'cv');
+  if (t === 'cv') loadCV();
+}
+
+function esc(s) { return (s || '').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
+
+async function loadJobs() {
+  const st = document.getElementById('f-status').value;
+  const q = document.getElementById('f-q').value;
+  const d = await api(`/api/jobs?status=${encodeURIComponent(st)}&q=${encodeURIComponent(q)}`);
+  STATUSES = d.statuses;
+  const sel = document.getElementById('f-status');
+  if (sel.options.length <= 1)
+    d.statuses.forEach(s => sel.insertAdjacentHTML('beforeend', `<option>${s}</option>`));
+  document.getElementById('count').textContent = `共 ${d.jobs.length} 条`;
+  const today = new Date().toISOString().slice(0, 10);
+  document.getElementById('rows').innerHTML = d.jobs.map(j => `
+    <tr onclick="openEdit('${j.id}')">
+      <td><strong>${esc(j.company)}</strong></td><td>${esc(j.position)}</td>
+      <td>${esc(j.location)}</td><td>${esc(j.salary)}</td>
+      <td><span class="badge st-${j.status}">${j.status}</span></td>
+      <td class="${j.deadline && j.deadline <= today && !['Offer','已拒绝','已归档'].includes(j.status) ? 'urgent' : ''}">${j.deadline || ''}</td>
+      <td class="muted">${(j.updated_at || '').slice(5)}</td>
+      <td onclick="event.stopPropagation()">
+        <select onchange="quickStatus('${j.id}', this.value)">
+          <option value="">改状态…</option>
+          ${d.statuses.map(s => `<option ${s === j.status ? 'disabled' : ''}>${s}</option>`).join('')}
+        </select>
+      </td>
+    </tr>`).join('') || '<tr><td colspan="8"><div class="empty">暂无岗位，点「＋ 新增岗位」开始</div></td></tr>';
+}
+
+async function quickStatus(id, status) {
+  if (!status) return;
+  await api(`/api/jobs/${encodeURIComponent(id)}/status`, {body: {status}});
+  loadJobs();
+}
+
+async function reindex() {
+  const d = await api('/api/reindex', {body: {}});
+  alert(`索引已重建：${d.count} 条岗位`);
+  loadJobs();
+}
+
+async function openEdit(id) {
+  editingId = id;
+  const sel = document.getElementById('e-status');
+  sel.innerHTML = STATUSES.map(s => `<option>${s}</option>`).join('');
+  document.getElementById('dlg-title').textContent = id ? '编辑岗位' : '新增岗位';
+  let j = {};
+  if (id) j = await api(`/api/jobs/${encodeURIComponent(id)}`);
+  for (const k of ['company','position','url','location','salary','source','deadline','notes','jd'])
+    document.getElementById('e-' + k).value = j[k] || '';
+  sel.value = j.status || '待投递';
+  document.getElementById('e-tags').value = (j.tags || []).join(', ');
+  dlg.showModal();
+}
+
+async function saveJob() {
+  const body = {};
+  for (const k of ['company','position','url','location','salary','source','deadline','notes','jd'])
+    body[k] = document.getElementById('e-' + k).value.trim();
+  body.status = document.getElementById('e-status').value;
+  body.tags = document.getElementById('e-tags').value.split(/[,，]/).map(s => s.trim()).filter(Boolean);
+  if (editingId) await api(`/api/jobs/${encodeURIComponent(editingId)}`, {method: 'PUT', body});
+  else await api('/api/jobs', {body});
+  dlg.close();
+  loadJobs();
+}
+
+/* ---- CV ---- */
+
+// 极简 Markdown 渲染：标题 / 列表 / 加粗 / 行内代码 / 段落
+function renderMd(md) {
+  const inline = s => esc(s)
+    .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
+    .replace(/`([^`]+)`/g, '<code>$1</code>');
+  const out = [];
+  let inList = false;
+  for (const line of md.split('\n')) {
+    const t = line.trim();
+    let m;
+    if ((m = t.match(/^###\s+(.*)/))) { if (inList) { out.push('</ul>'); inList = false; } out.push(`<h3>${inline(m[1])}</h3>`); }
+    else if ((m = t.match(/^##\s+(.*)/))) { if (inList) { out.push('</ul>'); inList = false; } out.push(`<h2>${inline(m[1])}</h2>`); }
+    else if ((m = t.match(/^#\s+(.*)/))) { if (inList) { out.push('</ul>'); inList = false; } out.push(`<h2>${inline(m[1])}</h2>`); }
+    else if ((m = t.match(/^[-*]\s+(.*)/))) { if (!inList) { out.push('<ul>'); inList = true; } out.push(`<li>${inline(m[1])}</li>`); }
+    else if (t) { if (inList) { out.push('</ul>'); inList = false; } out.push(`<p>${inline(t)}</p>`); }
+  }
+  if (inList) out.push('</ul>');
+  return out.join('');
+}
+
+// 去掉「## 关键词」小节（已用标签云展示，避免重复）
+function stripKeywords(md) {
+  return md.replace(/^##\s*关键词[^\n]*\n+(?:[^\n#]+\n+)?/m, '');
+}
+
+async function loadCV() {
+  const d = await api('/api/cv');
+  document.getElementById('cv-prompt').textContent = d.prompt;
+
+  // 原文件列表
+  document.getElementById('cv-files').innerHTML = d.files.length
+    ? '<ul style="margin:0;padding-left:20px">' + d.files.map(f =>
+        `<li><a href="/api/cv/file/${encodeURIComponent(f.name)}">${esc(f.name)}</a>
+         <span class="muted">（${(f.size/1024).toFixed(1)} KB，${f.mtime}）</span></li>`).join('') + '</ul>'
+    : 'cv/ 目录还没有 CV 原文件。';
+
+  // 解读卡片
+  const box = document.getElementById('cv-readings');
+  if (!d.readings.length) {
+    box.innerHTML = `<div class="card"><div class="empty">
+      还没有 CV 解读文件。<br>展开下方「✨ 还没有解读？」复制提示词，
+      让 AI 生成 <code>&lt;名字&gt;.reading.md</code> 放进 cv/ 目录即可。</div></div>`;
+    document.getElementById('prompt-card').open = true;
+    return;
+  }
+  document.getElementById('prompt-card').open = false;
+  box.innerHTML = d.readings.map(r => `
+    <div class="card">
+      <div class="reading-head">
+        <h3>🧭 ${esc(r.name.replace(/\.reading\.md$/, ''))}</h3>
+        <span class="muted">${esc(r.name)} · ${r.mtime}</span>
+      </div>
+      ${r.keywords.length ? `<div class="chips">${r.keywords.map(k => `<span class="chip">${esc(k)}</span>`).join('')}</div>` : ''}
+      <div class="md">${renderMd(stripKeywords(r.content))}</div>
+    </div>`).join('');
+}
+
+function copyPrompt() {
+  navigator.clipboard.writeText(document.getElementById('cv-prompt').textContent)
+    .then(() => alert('提示词已复制'));
+}
+
+loadJobs();
+</script>
+</body>
+</html>
