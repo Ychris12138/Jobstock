@@ -466,6 +466,83 @@ r13d = server.git_sync()
 check(r13d["ok"] is False and "数据目录不存在" in r13d["message"],
       "数据目录不存在时提示检查配置，而不是误报「找不到 git 命令」")
 
+# ---- 14. 重复岗位 ------------------------------------------------------------
+print("\n【14】重复岗位的识别与合并")
+# 上一节为了测 git 同步把数据目录切走了，这里必须切回来，否则接口读写的
+# 根本不是同一个目录（这个坑本身就值得留一条注释）
+server.configure(data_dir=str(TMP), cv_dir=str(TMP / "cv"))
+check(server.canonical_id({"company": "甲公司", "job_no": "A123", "position": "随便"})
+      == server.canonical_id({"company": "甲公司", "job_no": "A123", "position": "写法不同"}),
+      "有职位号时：岗位名写法不同也算出同一个 id")
+check(server.canonical_id({"company": "甲公司", "position": "算法"})
+      != server.canonical_id({"company": "甲公司", "position": "算法工程师"}),
+      "没有职位号时：只能退回按岗位名算，写法不同就会漏判")
+
+dup1 = add(company="重复公司", position="重复岗位 - 完整版", job_no="Z999", category="研究",
+           locations=["深圳", "北京"], recruit_type="校招", tags=["AI4S"],
+           source="官网", jd="完整的 JD", notes="官网抓来的信息")
+code, d = req("POST", "/api/jobs", {"company": "重复公司", "position": "重复岗位",
+                                    "job_no": "Z999"})
+check(code == 409 and "已经录过" in d.get("error", ""), "同一个职位号再录一次会被拦下（409）")
+
+# 跨机器的重复绕不过 API —— 合作者的文件是 git pull 进来的
+write_raw("合作者录的重复岗.json", {
+    "id": "合作者录的重复岗", "company": "重复公司", "position": "重复岗位",
+    "job_no": "Z999", "locations": ["杭州"], "tags": ["内推"], "source": "牛客",
+    "deadline": "2026-12-01", "notes": "合作者补充：有校友可以内推",
+    "created_at": "2026-03-01 10:00", "updated_at": "2026-03-01 10:00"})
+req("POST", f"/api/jobs/{U('合作者录的重复岗')}/status", {"status": "面试"})
+req("PUT", f"/api/jobs/{U('合作者录的重复岗')}", {"my_notes": "合作者的笔记"})
+req("PUT", f"/api/jobs/{U(dup1)}", {"my_notes": "我自己的笔记"})
+
+code, r14 = req("POST", "/api/reindex")
+grp = [g for g in r14["duplicates"] if set(g["ids"]) == {dup1, "合作者录的重复岗"}]
+check(len(grp) == 1 and grp[0]["auto"], "同公司同职位号被识别为可自动合并的重复")
+
+code, dd = req("POST", "/api/dedupe")
+check(len(dd["merged"]) == 1 and dd["merged"][0]["keep"] == dup1,
+      "合并保留信息更全的那条")
+_, kept = req("GET", f"/api/jobs/{U(dup1)}")
+check(sorted(kept["locations"]) == sorted(["深圳", "北京", "杭州"]), "地点取并集")
+check(sorted(kept["tags"]) == sorted(["AI4S", "内推"]), "标签取并集")
+check(kept.get("deadline") == "2026-12-01", "空字段被对方补上")
+check(kept["source"] == "官网", "非空字段不被覆盖")
+check("有校友可以内推" in kept["notes"] and "官网抓来的信息" in kept["notes"],
+      "两边的公共备注都留着，不静默丢掉别人写的情报")
+check(kept["status"] == "面试", "投递状态取进度更靠后的（面试 > 待投递）")
+check("合作者的笔记" in kept["my_notes"] and "我自己的笔记" in kept["my_notes"],
+      "个人备注拼接")
+code, _ = req("GET", f"/api/jobs/{U('合作者录的重复岗')}")
+check(code == 404, "被合并的那条已删除")
+check("合作者录的重复岗" not in json.loads(
+      (TMP / "local" / "status.json").read_text(encoding="utf-8")), "个人层的残留也清掉了")
+
+# 弱信号：同公司同名但没有职位号，可能真是两个不同部门的岗位，不能自动合并
+write_raw("弱重复A.json", {"id": "弱重复A", "company": "弱公司", "position": "算法工程师",
+                          "tags": [], "created_at": "2026-01-01 10:00", "updated_at": "2026-01-01 10:00"})
+write_raw("弱重复B.json", {"id": "弱重复B", "company": "弱公司", "position": "算法工程师 ",
+                          "tags": [], "created_at": "2026-01-02 10:00", "updated_at": "2026-01-02 10:00"})
+code, r14b = req("POST", "/api/reindex")
+weak = [g for g in r14b["duplicates"] if set(g["ids"]) == {"弱重复A", "弱重复B"}]
+check(len(weak) == 1 and not weak[0]["auto"], "名字相似只报告，不自动合并")
+code, dd2 = req("POST", "/api/dedupe")
+check(all(set(m["dropped"]) != {"弱重复B"} for m in dd2["merged"]), "弱信号不会被自动合并掉")
+
+# 补了职位号之后 id 升级，个人状态要跟着搬
+write_raw("待升级岗.json", {"id": "待升级岗", "company": "升级公司", "position": "某岗位",
+                          "job_no": "U777", "tags": [],
+                          "created_at": "2026-01-01 10:00", "updated_at": "2026-01-01 10:00"})
+# 注意别在这里调 /api/reindex —— 那条路由内部就会跑 migrate_ids，
+# 岗位会提前改名，后面用旧 id 设状态就 404 了
+req("POST", f"/api/jobs/{U('待升级岗')}/status", {"status": "笔试"})
+renamed = server.migrate_ids()
+new_id = server.canonical_id({"company": "升级公司", "job_no": "U777"})
+check(("待升级岗", new_id) in renamed, "补了职位号的岗位 id 升级为「公司-职位号」")
+check(not (TMP / "jobs" / "待升级岗.json").exists(), "旧文件已改名")
+server.reindex()
+_, up = req("GET", f"/api/jobs/{U(new_id)}")
+check(up["status"] == "笔试", "改名后投递进度没丢（个人状态的键跟着搬了）")
+
 SRV.shutdown()
 shutil.rmtree(TMP, ignore_errors=True)
 print(f"\n{'='*46}\n通过 {PASSED} 项，失败 {FAILED} 项\n{'='*46}")

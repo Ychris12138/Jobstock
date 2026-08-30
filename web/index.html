@@ -186,6 +186,7 @@
     <div class="sec">🌍 招聘信息 <span>— 进 git，合作者都能看到</span></div>
     <label>公司 *</label><input id="e-company" list="dl-company" placeholder="可选择已有，也可直接输入新公司">
     <label>岗位 *</label><input id="e-position" list="dl-position" placeholder="原始职位名，如：算法工程师(NLP)">
+    <label>职位号</label><input id="e-job_no" placeholder="官方职位编号，如 A212198A —— 填了就不会和别人录重复">
     <label>分类</label><select id="e-category"></select>
     <label>类型</label><select id="e-recruit_type"></select>
     <label>链接</label><input id="e-url" placeholder="投递页 / JD 链接">
@@ -285,10 +286,11 @@ function esc(s) {
     c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 }
 
-function notice(text) {
+// 提示条内容自带按钮，所以走 innerHTML —— 传进来的数据必须先 esc
+function notice(html) {
   const box = document.getElementById('notice');
-  box.textContent = text || '';
-  box.hidden = !text;
+  box.innerHTML = html || '';
+  box.hidden = !html;
 }
 
 // 重建下拉选项但保留当前选中；当前值不在候选里时补一个临时项，避免选中态被抹掉
@@ -399,12 +401,33 @@ async function quickStatus(id, status) {
   loadJobs();
 }
 
-// 把 reindex / sync 报出来的跳过与告警显示成常驻提示条，别用 alert 一闪而过
+// 把 reindex / sync 报出来的问题显示成常驻提示条，别用 alert 一闪而过
 function showReport(d, prefix) {
   const lines = [...(d.skipped || []).map(x => '⚠️ 跳过 ' + x),
                  ...(d.warnings || []).map(x => '⚠️ ' + x)];
-  notice(lines.length ? `${prefix}，但有 ${lines.length} 个文件需要你处理：\n` + lines.join('\n') : '');
-  return lines.length;
+  const dups = d.duplicates || [];
+  let html = lines.length ? `${esc(prefix)}，但有 ${lines.length} 个文件需要你处理：\n`
+                            + lines.map(esc).join('\n') : '';
+  if (dups.length) {
+    const auto = dups.filter(g => g.auto).length;
+    html += (html ? '\n\n' : '') + `🔁 发现 ${dups.length} 组疑似重复岗位：\n`
+      + dups.map(g => `  · ${esc(g.reason)}\n      ${g.ids.map(esc).join('  ／  ')}`
+                      + (g.auto ? '' : '   ← 同公司不同部门也可能同名，需你确认')).join('\n');
+    if (auto) html += `\n\n<button class="btn small" onclick="dedupe()">合并可自动处理的 ${auto} 组</button>`;
+  }
+  notice(html);
+  return lines.length + dups.length;
+}
+
+// 合并重复岗位：只处理强信号的（同职位号 / 同投递链接）
+async function dedupe() {
+  const d = await api('/api/dedupe', {body: {}});
+  if (!d.merged.length) { alert('没有可自动合并的重复组。'); return; }
+  alert('已合并 ' + d.merged.length + ' 组：\n\n'
+        + d.merged.map(m => `${m.dropped.join('、')}\n  → 并入 ${m.keep}`).join('\n\n')
+        + '\n\n投递状态取了进度更靠后的那条，个人备注做了拼接。');
+  showReport(d, `合并完成，现共 ${d.count} 条岗位`);
+  loadJobs();
 }
 
 async function reindex() {
@@ -422,7 +445,7 @@ async function syncRepo() {
   loadJobs();
 }
 
-const SHARED_INPUTS = ['company','position','url','salary','source','deadline','notes','jd'];
+const SHARED_INPUTS = ['company','position','job_no','url','salary','source','deadline','notes','jd'];
 
 // 让 select 能装下枚举外的存量值：不补这个临时项的话，读回来是空串，
 // 一保存就把合作者写的分类/状态抹掉了

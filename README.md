@@ -19,7 +19,7 @@ cv/                CV 原文 + <名字>.reading.md 解读文件（格式见 cv/R
 
 | | 共享（进 git） | 个人（不进 git） |
 |---|---|---|
-| 字段 | `company / position / category / recruit_type / url / locations[] / salary / source / deadline / tags[] / notes / jd` | `status / my_notes` |
+| 字段 | `company / position / job_no / category / recruit_type / url / locations[] / salary / source / deadline / tags[] / notes / jd` | `status / my_notes` |
 | 含义 | 客观招聘信息 + 对大家都有用的公共备注（如「内推码到 9 月底」「卡 985」） | 我投到哪一步了、我自己的记录 |
 | 谁能看到 | 所有合作者 | 只有本机 |
 
@@ -39,6 +39,34 @@ cv/                CV 原文 + <名字>.reading.md 解读文件（格式见 cv/R
 枚举要加值就改 `server.py` 里的 `CATEGORIES` / `RECRUIT_TYPES`，前后端同时生效。
 
 状态枚举：`待投递 / 已投递 / 笔试 / 面试 / Offer / 已拒绝 / 已归档`（只归档，不删除）
+
+### 岗位 id 与去重
+
+id 由内容算出来，**有官方职位号就用它**：
+
+```
+有 job_no：  <公司>-<职位号>      例：字节跳动-a212198a
+没有   ：    <公司>-<岗位名>      例：小米-infra岗
+```
+
+这是为了对付多人协作时最烦的问题：**两个人各自录了同一个岗位**。
+填了职位号，两人算出的 id 必然相同，于是重复会变成 git 冲突（看得见、必须处理）；
+不填就只能按岗位名算，写法差一个字就会变成两条静默共存的记录。
+**所以录岗位时尽量把官方职位号填上。**
+
+系统还有两道兜底：
+
+1. **新增时拦截**：同一个职位号再录一次直接返回 409，告诉你已经有了，不会造出「-2」的副本
+2. **重建索引时检测**：按「同公司同职位号」「同投递链接」「公司+岗位名指纹相同」三个信号
+   找出重复组，显示在页面顶部。前两个是强信号，可以点「合并」自动处理；第三个只报告
+   ——同一家公司不同部门完全可能有同名岗位，那种要人来判断
+
+自动合并的规则：保留信息最全的那条（打平时取先录进来的），**空字段用另一条补齐、
+`locations` 与 `tags` 取并集、`notes` 内容不同就拼接**（宁可留着让人删，也不要悄悄丢掉
+合作者写的情报）；个人层取走得最远的那个状态，个人备注拼接。
+
+补 `job_no` 会让 id 变化，文件随之改名，个人状态的键会一起搬过去，投递进度不会丢。
+只有「有职位号且当前 id 不是按它算的」时才改名 —— 改公司名或岗位名不会引发改名。
 
 ## 安装（新机器一键搞定）
 
@@ -130,9 +158,11 @@ python install.py --data-dir "D:\jobs-data" --cv-dir "~/Documents/my-cv"
    **城市写进 `locations`、招聘类型写进 `recruit_type`，不要写进 `tags`** ——
    写错了接口会自动归位，但别指望它，一开始就写对。
    多地可选的岗位把城市全列进 `locations`，不要只留第一个。
-4. 日期一律 `YYYY-MM-DD`，日期时间 `YYYY-MM-DD HH:mm`。
-5. 不删除历史岗位，把 `status` 改为 `已归档`（这是本地操作）。
-6. sqlite 只读查询随意；写入请改 JSON 后 reindex，避免两边不一致。
+4. **官方职位号填进 `job_no`**（如字节的 A212198A）—— 这是去重的主要依据，
+   填了就不会和合作者录重。
+5. 日期一律 `YYYY-MM-DD`，日期时间 `YYYY-MM-DD HH:mm`。
+6. 不删除历史岗位，把 `status` 改为 `已归档`（这是本地操作）。
+7. sqlite 只读查询随意；写入请改 JSON 后 reindex，避免两边不一致。
 
 ## 筛选
 
@@ -154,7 +184,8 @@ python install.py --data-dir "D:\jobs-data" --cv-dir "~/Documents/my-cv"
 | POST | `/api/jobs` | 新增（company/position 必填）；`status`/`my_notes` 会被分流到本地 |
 | PUT | `/api/jobs/<id>` | 修改；共享字段**真的变了**才写 JSON 并更新 `updated_at`（空串与缺失字段视为相等，所以 no-op 保存不产生 git diff）。改共享字段必须带 `base_rev`（乐观锁，不匹配返回 409；`"*"` 强制覆盖），只改个人字段不需要 |
 | POST | `/api/jobs/<id>/status` | 快捷改状态 `{ "status": "已投递" }` —— **只写本地** |
-| POST | `/api/reindex` | 从 JSON + 本地状态重建索引；响应含 `skipped`（读不出来/id 重复的文件）与 `warnings`（日期格式、枚举外的分类），**不会静默吞掉岗位** |
+| POST | `/api/reindex` | 从 JSON + 本地状态重建索引；响应含 `skipped`（读不出来/id 重复的文件）、`warnings`（日期格式、枚举外的取值）与 `duplicates`（重复岗位组），**不会静默吞掉岗位** |
+| POST | `/api/dedupe` | 合并强信号的重复岗位组（同职位号 / 同投递链接），返回合并了哪些 |
 | POST | `/api/sync` | `git pull --rebase --autostash` 拉取合作者数据后重建索引（只拉不推）。rebase 失败会自动 `--abort` 恢复；autostash 贴回冲突时（git 此时退出码是 0）也判为失败并说清楚改动在 stash 里 |
 | GET | `/api/cv` | CV 原文件列表 + 解读文件（含解析出的关键词）+ 解读提示词 |
 
@@ -164,13 +195,14 @@ python install.py --data-dir "D:\jobs-data" --cv-dir "~/Documents/my-cv"
 python3 test_server.py
 ```
 
-用合成数据在临时目录里跑 93 条断言，不会碰你真实的 `jobs/` 与 `local/`。覆盖：
+用合成数据在临时目录里跑 112 条断言，不会碰你真实的 `jobs/` 与 `local/`。覆盖：
 数据分层与 no-op 保存不产生 diff、迁移幂等且保留未知字段、多地点筛选、
 枚举外的值不被静默清空、
 乐观锁冲突、个人状态文件损坏时拒绝写入、reindex 对坏文件/缺 id/重复 id 的报告、
 日期归一、标签归一、筛选语义、LIKE 通配符转义、异常转 500 JSON、CV 关键词解析，
-以及 git 同步（临时建一个 bare origin + 两个 clone，覆盖「工作区脏时能拉」
-和「autostash 冲突时不误报成功」）。
+git 同步（临时建一个 bare origin + 两个 clone，覆盖「工作区脏时能拉」和
+「autostash 冲突时不误报成功」），以及重复岗位的识别与合并（含跨机器场景：
+合作者的文件是 git pull 进来的，绕过了新增时的拦截）。
 
 最后一节是**鉴别力自检**：把 LIKE 转义整个关掉后重跑通配符相关的断言，它们必须失败。
 之前的版本里关掉转义仍有 32/33 条通过 —— 断言写了，但构造的输入让它无法失败。

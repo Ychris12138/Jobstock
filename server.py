@@ -123,6 +123,9 @@ def configure(data_dir=None, cv_dir=None):
 
 
 STATUSES = ["待投递", "已投递", "笔试", "面试", "Offer", "已拒绝", "已归档"]
+# 投递进度的先后：合并重复岗位时取「走得更远」的那个状态。不能直接用上面的下标，
+# 那会让「已拒绝」排在「Offer」之后；归档不代表进度，权重最低。
+STATUS_RANK = {"已归档": -1, "待投递": 0, "已投递": 1, "笔试": 2, "面试": 3, "Offer": 4, "已拒绝": 4}
 
 # 岗位一级分类：受控枚举，用于粗粒度筛选。要加新方向就改这个列表，前后端同时生效。
 # 注意：枚举外的存量值不会被清掉，前端会把它当成临时选项显示出来。
@@ -140,20 +143,20 @@ KNOWN_CITIES = ["北京", "上海", "深圳", "杭州", "广州", "成都", "南
 
 # 共享字段 —— 写进 jobs/<id>.json，随 git 同步给所有人
 # locations 是数组：一个岗位常常多地可选，塞进单值字段会丢信息
-SHARED_FIELDS = ["company", "position", "category", "recruit_type", "url", "locations",
-                 "salary", "source", "deadline", "tags", "notes", "jd"]
+SHARED_FIELDS = ["company", "position", "job_no", "category", "recruit_type", "url",
+                 "locations", "salary", "source", "deadline", "tags", "notes", "jd"]
 # 个人字段 —— 写进 local/status.json，只留在本机
 LOCAL_FIELDS = ["status", "my_notes"]
 # JSON 落盘的字段顺序：固定下来，多人协作时 git diff 才干净
 JSON_ORDER = ["id"] + SHARED_FIELDS + ["created_at", "updated_at"]
 
 # sqlite 索引表的列。改这里不需要迁移脚本 —— reindex 会 DROP 重建整张表。
-INDEX_COLUMNS = ["id", "company", "position", "category", "recruit_type", "locations",
+INDEX_COLUMNS = ["id", "company", "position", "job_no", "category", "recruit_type", "locations",
                  "salary", "source", "url", "deadline", "tags", "notes", "jd",
                  "status", "my_notes", "status_updated_at", "updated_at", "created_at"]
 # 列表接口返回的列：不含 jd/notes 这类大字段，它们只参与关键词搜索。
 # url 要返回 —— 列表里的公司名是可以直接点开岗位页的外链。
-LIST_COLUMNS = ["id", "company", "position", "category", "recruit_type", "locations",
+LIST_COLUMNS = ["id", "company", "position", "job_no", "category", "recruit_type", "locations",
                 "salary", "source", "url", "status", "deadline", "tags", "my_notes",
                 "status_updated_at", "updated_at", "created_at"]
 # 单值维度：精确等值筛选（同一维度内多值取 OR）
@@ -163,7 +166,7 @@ MULTI_COLUMNS = ["locations", "tags"]
 # 生成筛选下拉候选项的单值维度（多值列的候选项另外算）
 FACET_COLUMNS = ["company", "position", "category", "recruit_type", "source"]
 # 入库前需要 strip 的文本维度（查询侧也 strip，两边必须对称，否则永远筛不出来）
-STRIP_COLUMNS = ["company", "position", "category", "recruit_type", "source", "status"]
+STRIP_COLUMNS = ["company", "position", "job_no", "category", "recruit_type", "source", "status"]
 
 CV_PROMPT = """请阅读我提供的 CV，生成一份「CV 解读文件」，保存为 cv/<名字>.reading.md，格式严格如下：
 
@@ -263,6 +266,29 @@ def now():
 def slugify(text):
     s = re.sub(r"[^\w一-鿿-]+", "-", text.strip().lower()).strip("-")
     return s or "job"
+
+
+def canonical_id(job):
+    """由岗位内容算出规范 id。
+
+    有官方职位号就用「公司-职位号」：两个人各自录同一个岗位时必然算出同一个 id，
+    于是重复会变成 git 冲突（看得见、要处理），而不是两条静默共存的记录。
+    没有职位号时退回「公司-岗位名」，这时写法稍有出入就会漏判，只能靠去重检测兜底。
+    """
+    company = norm_text(job.get("company"))
+    job_no = norm_text(job.get("job_no"))
+    if company and job_no:
+        return slugify(f"{company}-{job_no}")
+    return slugify(f"{company}-{norm_text(job.get('position'))}")
+
+
+def fuzzy_key(s):
+    """把文本压成用于比对的指纹：去掉空白、标点、大小写差异。
+
+    「AI分子动力学算法研究员 - AI for Science」和「AI分子动力学算法研究员-AI for science」
+    应该被认成同一个岗位。
+    """
+    return re.sub(r"[^\w一-鿿]+", "", norm_text(s).lower())
 
 
 def load_json(path):
@@ -497,6 +523,143 @@ def migrate():
 migrate_status = migrate   # 旧名字，保持向后兼容
 
 
+def rename_job(old_id, new_id):
+    """给岗位换 id：共享文件改名 + 个人状态的键跟着搬。
+
+    两边必须一起改 —— 只改文件名的话，投递进度就跟岗位脱节了（状态还挂在旧 id 上，
+    界面上看到的会变回「待投递」）。目标 id 已被占用时返回 False 不动手，
+    那种情况说明真撞车了，交给去重流程处理。
+    """
+    old_p, new_p = job_path(old_id), job_path(new_id)
+    if not old_p or not new_p or not old_p.exists() or new_p.exists():
+        return False
+    job = load_json(old_p)
+    if not isinstance(job, dict):
+        return False
+    job["id"] = new_id
+    write_json_atomic(new_p, ordered_job(job))
+    old_p.unlink(missing_ok=True)
+    with _LOCAL_LOCK, local_lock():
+        table = read_local_strict()
+        if old_id in table:
+            table[new_id] = {**table.get(new_id, {}), **table.pop(old_id)}
+            write_json_atomic(local_path(), table)
+    return True
+
+
+def migrate_ids():
+    """把补了官方职位号的岗位升级到规范 id（文件随之改名）。
+
+    只在「有 job_no 且当前 id 不是按它算出来的」时才动，所以改公司名或岗位名
+    不会引发改名 —— id 保持稳定，只有补上职位号时会换一次。
+    """
+    renamed = []
+    with _JOBS_LOCK:
+        for f in sorted(JOBS_DIR.glob("*.json")):
+            job = load_json(f)
+            if not isinstance(job, dict) or not norm_text(job.get("job_no")):
+                continue
+            old = norm_text(job.get("id")) or f.stem
+            new = canonical_id(job)
+            if old != new and rename_job(old, new):
+                renamed.append((old, new))
+    return renamed
+
+
+def find_duplicates():
+    """扫描共享岗位，找出重复组。
+
+    三个信号，可靠性递减：
+      - 同公司 + 同官方职位号  → 铁定是同一个岗位，可以自动合并
+      - 同一个投递链接        → 同上
+      - 同公司 + 岗位名指纹相同 → 只是疑似（同一家公司不同部门可能有同名岗位），
+                                只报告，不自动合并
+    返回 [{"reason", "ids", "auto"}]，auto=True 的才允许自动合并。
+    """
+    jobs = []
+    for f in sorted(JOBS_DIR.glob("*.json")):
+        job = load_json(f)
+        if isinstance(job, dict):
+            job["id"] = norm_text(job.get("id")) or f.stem
+            jobs.append(job)
+
+    groups, seen = [], set()
+
+    def collect(keyfn, reason, auto):
+        buckets = {}
+        for j in jobs:
+            k = keyfn(j)
+            if k:
+                buckets.setdefault(k, []).append(j["id"])
+        for k, ids in buckets.items():
+            if len(ids) < 2 or frozenset(ids) in seen:
+                continue
+            seen.add(frozenset(ids))
+            groups.append({"reason": reason.format(k=k), "ids": ids, "auto": auto})
+
+    collect(lambda j: (f"{norm_text(j.get('company'))}|{norm_text(j.get('job_no'))}"
+                       if norm_text(j.get("company")) and norm_text(j.get("job_no")) else ""),
+            "同一家公司的同一个职位号（{k}）", True)
+    collect(lambda j: norm_text(j.get("url")), "投递链接完全相同（{k}）", True)
+    collect(lambda j: (f"{fuzzy_key(j.get('company'))}|{fuzzy_key(j.get('position'))}"
+                       if fuzzy_key(j.get("company")) and fuzzy_key(j.get("position")) else ""),
+            "公司与岗位名几乎一样（{k}）", False)
+    return groups
+
+
+def _pick_survivor(jobs):
+    """挑出重复组里要保留的那条：信息最全的；打平时取先录进来的。"""
+    def filled(j):
+        return sum(1 for k in SHARED_FIELDS if j.get(k) not in (None, "", [], {}))
+    return sorted(jobs, key=lambda j: (-filled(j), norm_text(j.get("created_at")) or "9999",
+                                       j["id"]))[0]
+
+
+def merge_group(ids):
+    """把一组重复岗位合并成一条，返回 (保留的 id, 被删掉的 id 列表)。
+
+    共享层：空字段用其他条补齐；locations / tags 取并集；notes 内容不同就拼起来，
+    宁可留着让人删，也不要悄悄丢掉别人写的情报。
+    个人层：状态取走得最远的那个（见 STATUS_RANK），个人备注拼接。
+    """
+    jobs = [j for j in (load_shared(i) for i in ids) if j]
+    if len(jobs) < 2:
+        return None, []
+    keep = _pick_survivor(jobs)
+    others = [j for j in jobs if j["id"] != keep["id"]]
+
+    merged = dict(keep)
+    for j in others:
+        for k in SHARED_FIELDS:
+            if k in MULTI_COLUMNS:
+                merged[k] = norm_list(list(merged.get(k) or []) + list(j.get(k) or []))
+            elif not norm_text(merged.get(k)) and norm_text(j.get(k)):
+                merged[k] = j[k]
+            elif k == "notes" and norm_text(j.get(k)) and norm_text(j[k]) not in norm_text(merged.get(k)):
+                merged[k] = f"{merged[k]}\n{j[k]}".strip()
+    merged["updated_at"] = now()
+
+    with _JOBS_LOCK, _LOCAL_LOCK, local_lock():
+        table = read_local_strict()
+        recs = [table.get(i) for i in ids if isinstance(table.get(i), dict)]
+        if recs:
+            best = max(recs, key=lambda r: (STATUS_RANK.get(r.get("status", ""), 0),
+                                            r.get("updated_at", "")))
+            notes = [r["my_notes"] for r in recs if norm_text(r.get("my_notes"))]
+            rec = dict(best)
+            if notes:
+                rec["my_notes"] = "\n".join(dict.fromkeys(notes))
+            table[keep["id"]] = rec
+        for j in others:
+            table.pop(j["id"], None)
+            p = job_path(j["id"])
+            if p:
+                p.unlink(missing_ok=True)
+        write_json_atomic(local_path(), table)
+        save_job(merged)
+    return keep["id"], [j["id"] for j in others]
+
+
 def split_tag_fields(data):
     """把请求里误写进 tags 的城市与招聘类型归位到各自的字段。
 
@@ -605,7 +768,8 @@ def reindex():
         conn.commit()
     finally:
         conn.close()
-    return {"count": len(seen), "skipped": skipped, "warnings": warnings}
+    return {"count": len(seen), "skipped": skipped, "warnings": warnings,
+            "duplicates": find_duplicates()}
 
 
 def _like(s):
@@ -789,6 +953,7 @@ def git_sync():
                 "在处理完之前，这些岗位在列表里是看不到的。\n\n" + out}
 
     migrate()
+    migrate_ids()
     return {"ok": True, "message": out, **reindex()}
 
 
@@ -937,9 +1102,21 @@ class Handler(BaseHTTPRequestHandler):
         path = urllib.parse.unquote(urllib.parse.urlparse(self.path).path)
         if path == "/api/reindex":
             migrate()
+            migrate_ids()
             return self.send_json({"ok": True, **reindex()})
         if path == "/api/sync":
             return self.send_json(git_sync())
+        if path == "/api/dedupe":
+            # 只合并强信号的重复组（同职位号 / 同链接）。名字相似属于疑似，
+            # 同一家公司不同部门完全可能有同名岗位，那种要人来判断。
+            merged = []
+            for g in find_duplicates():
+                if not g["auto"]:
+                    continue
+                keep, dropped = merge_group(g["ids"])
+                if keep:
+                    merged.append({"keep": keep, "dropped": dropped, "reason": g["reason"]})
+            return self.send_json({"ok": True, "merged": merged, **reindex()})
         if path == "/api/jobs":
             data = self.read_body()
             split_tag_fields(data)
@@ -951,7 +1128,14 @@ class Handler(BaseHTTPRequestHandler):
             # 先探一次个人层：它坏了就别写共享层，否则会留下一个谁也删不掉的孤儿岗位
             read_local_strict()
             with _JOBS_LOCK:      # id 分配 + 落盘要一起做，否则并发新增会互相覆盖
-                base = slugify(f"{norm_text(data['company'])}-{norm_text(data['position'])}")
+                base = canonical_id(data)
+                # 有职位号时 base 是稳定的，撞上说明这个岗位已经录过了 —— 与其造一条
+                # 「-2」的重复记录，不如直接告诉用户去哪看
+                if norm_text(data.get("job_no")) and (JOBS_DIR / f"{base}.json").exists():
+                    return self.send_json(
+                        {"error": f"这个岗位已经录过了（职位号 {data['job_no']}），"
+                                  f"在列表里搜「{norm_text(data.get('company'))}」就能找到。",
+                         "existing_id": base}, 409)
                 jid, i = base, 2
                 while (JOBS_DIR / f"{jid}.json").exists():
                     jid, i = f"{base}-{i}", i + 1
@@ -1053,6 +1237,8 @@ def main():
         # 只读路径本来就能降级，不该因为写不了就连岗位列表都打不开
         print(f"⚠️  {e}\n服务器照常启动，但个人层是只读的：列表能看，改状态会报错。")
         moved = []
+    for old, new in migrate_ids():
+        print(f"岗位 id 升级为职位号形式：{old} → {new}")
     if moved:
         print(f"已升级 {len(moved)} 条岗位的数据格式（投递状态搬到 {local_path()}；"
               f"地点改为多值字段；标签里的城市与招聘类型归位）")
@@ -1062,6 +1248,9 @@ def main():
         print(f"⚠️  跳过 {line}")
     for line in r["warnings"]:
         print(f"⚠️  {line}")
+    for g in r["duplicates"]:
+        print(f"⚠️  疑似重复（{g['reason']}）：{' / '.join(g['ids'])}"
+              f"{'  ← 可在网页点「合并重复」自动处理' if g['auto'] else '  ← 需人工确认'}")
     if args.reindex:
         print(f"已重建索引：{r['count']} 条岗位（{JOBS_DIR}）")
         return
