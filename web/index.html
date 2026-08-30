@@ -111,6 +111,15 @@
                font-size: 13.5px; line-height: 1.7; margin: 12px 0 0; border: 1.5px solid var(--line); }
   .empty { text-align: center; color: var(--muted); padding: 30px 0; font-size: 15px; }
   .sub-time { display: block; font-size: 11.5px; color: var(--muted); margin-top: 3px; }
+  /* 地点 chip：一个岗位常常多地可选，用颜色区分城市，扫一眼就能找到目标城市 */
+  .locs { display: flex; flex-wrap: wrap; gap: 4px; }
+  .loc { padding: 2px 9px; border-radius: 7px; font-size: 12.5px; font-weight: 600;
+         border: 1px solid; white-space: nowrap; }
+  .rt { display: inline-block; padding: 2px 10px; border-radius: 7px; font-size: 12.5px;
+        font-weight: 600; background: #f1f3f5; color: #5a6070; }
+  .ext { margin-left: 6px; font-size: 13px; font-weight: 700; text-decoration: none;
+         opacity: .45; transition: opacity .15s; }
+  .ext:hover { opacity: 1; text-decoration: none; }
   .warn { background: #fff8e6; border: 1.5px solid #f0d78c; color: #8a6d1f; border-radius: 14px;
           padding: 12px 16px; margin-bottom: 14px; font-size: 14px; white-space: pre-wrap; }
 </style>
@@ -129,6 +138,7 @@
     <div class="toolbar">
       <button class="btn" onclick="openEdit(null)">＋ 新增岗位</button>
       <select id="f-category" onchange="loadJobs()"><option value="">全部分类</option></select>
+      <select id="f-recruit_type" onchange="loadJobs()"><option value="">全部类型</option></select>
       <select id="f-company" onchange="loadJobs()"><option value="">全部公司</option></select>
       <select id="f-location" onchange="loadJobs()"><option value="">全部地点</option></select>
       <select id="f-position" onchange="loadJobs()"><option value="">全部岗位</option></select>
@@ -146,7 +156,7 @@
     <div class="tagbar" id="tagbar"></div>
     <table>
       <thead><tr>
-        <th>公司</th><th>岗位</th><th>分类</th><th>地点</th><th>薪资</th>
+        <th>公司</th><th>岗位</th><th>分类</th><th>类型</th><th>工作地点</th><th>薪资</th>
         <th>状态 <span class="local-mark">仅本机</span></th>
         <th>截止</th><th>更新</th><th>快捷状态</th>
       </tr></thead>
@@ -177,8 +187,10 @@
     <label>公司 *</label><input id="e-company" list="dl-company" placeholder="可选择已有，也可直接输入新公司">
     <label>岗位 *</label><input id="e-position" list="dl-position" placeholder="原始职位名，如：算法工程师(NLP)">
     <label>分类</label><select id="e-category"></select>
+    <label>类型</label><select id="e-recruit_type"></select>
     <label>链接</label><input id="e-url" placeholder="投递页 / JD 链接">
-    <label>地点</label><input id="e-location" list="dl-location" placeholder="可选择已有，也可直接输入新地点">
+    <label>工作地点</label><input id="e-locations" list="dl-location"
+           placeholder="多地可选就用逗号分隔，如：深圳, 北京, 上海">
     <label>薪资</label><input id="e-salary" placeholder="如：30-45K·14薪">
     <label>来源</label><input id="e-source" list="dl-source" placeholder="官网 / 牛客 / 内推…">
     <label>截止</label><input id="e-deadline" type="date">
@@ -203,14 +215,33 @@
 
 <script>
 const dlg = document.getElementById('dlg');
-let STATUSES = [], CATEGORIES = [], editingId = null, editingBase = '';
+let STATUSES = [], CATEGORIES = [], RECRUIT_TYPES = [], editingId = null, editingBase = '';
 const selectedTags = new Set();   // 已勾选的标签，多个取 AND
 let loadSeq = 0, searchTimer = null;
 
 // 筛选控件 → 查询参数的对应关系
-const FILTERS = [['f-category','category'], ['f-company','company'], ['f-location','location'],
+const FILTERS = [['f-category','category'], ['f-recruit_type','recruit_type'],
+                 ['f-company','company'], ['f-location','location'],
                  ['f-position','position'], ['f-source','source'], ['f-status','status'],
                  ['f-deadline','deadline_before'], ['f-q','q']];
+
+// 城市配色：常见城市固定颜色（同一城市在任何页面都是同一色，方便扫视），
+// 其余按名字 hash 到备用色板，保证稳定不跳色。
+const CITY_COLOR = {
+  '北京': '#e8590c', '上海': '#1971c2', '深圳': '#2f9e44', '杭州': '#9c36b5',
+  '广州': '#c2255c', '成都': '#e67700', '南京': '#0c8599', '苏州': '#5f3dc4',
+  '香港': '#c92a2a', '武汉': '#087f5b', '西安': '#5c940d', '远程': '#495057',
+};
+const CITY_FALLBACK = ['#1971c2','#2f9e44','#9c36b5','#e8590c','#0c8599','#c2255c','#5f3dc4','#5c940d'];
+function cityColor(c) {
+  if (CITY_COLOR[c]) return CITY_COLOR[c];
+  let h = 0;
+  for (const ch of c) h = (h * 31 + ch.charCodeAt(0)) >>> 0;
+  return CITY_FALLBACK[h % CITY_FALLBACK.length];
+}
+
+// 只放行 http(s)：url 来自共享 JSON，合作者可写，不能让 javascript: 之类进到 href
+function safeUrl(u) { return /^https?:\/\//i.test(u || '') ? u : ''; }
 
 // 统一请求封装：先判 HTTP 状态再解析，网络层失败也要提示。
 // 服务端异常时连接可能被直接关闭，不兜住的话用户看到的是「点了没反应」。
@@ -317,9 +348,11 @@ async function loadJobs() {
 
   STATUSES = d.statuses;
   CATEGORIES = d.categories;
+  RECRUIT_TYPES = d.recruit_types;
   setOptions(document.getElementById('f-status'), d.statuses, '全部状态');
-  // 分类下拉用 facets（后端已把枚举和存量值合并），否则枚举外的存量岗位筛不出来
+  // 分类/类型下拉用 facets（后端已把枚举和存量值合并），否则枚举外的存量岗位筛不出来
   setOptions(document.getElementById('f-category'), d.facets.category, '全部分类');
+  setOptions(document.getElementById('f-recruit_type'), d.facets.recruit_type, '全部类型');
   for (const [id, key] of [['f-company','company'], ['f-location','location'],
                            ['f-position','position'], ['f-source','source']])
     setOptions(document.getElementById(id), d.facets[key], '全部' +
@@ -327,6 +360,7 @@ async function loadJobs() {
   renderTagbar(d.facets.tags);
   // 新增/编辑弹窗的输入建议（datalist 允许自由输入新值）
   for (const k of ['company', 'position', 'location']) setDatalist('dl-' + k, d.facets[k]);
+  // 标签栏现在只剩主题标签 —— 城市去了 locations，校招/实习去了 recruit_type
   setDatalist('dl-tags', d.facets.tags);
   setDatalist('dl-source', [...new Set([...d.facets.source,
     '官网', '牛客', '内推', 'Boss直聘', '实习僧', '猎头'])]);
@@ -335,10 +369,17 @@ async function loadJobs() {
   const today = new Date().toISOString().slice(0, 10);
   document.getElementById('rows').innerHTML = d.jobs.map(j => `
     <tr onclick="openEdit('${encodeURIComponent(j.id)}')">
-      <td><strong>${esc(j.company)}</strong></td>
+      <td><strong>${esc(j.company)}</strong>${safeUrl(j.url)
+        ? `<a class="ext" href="${esc(safeUrl(j.url))}" target="_blank" rel="noopener"
+              onclick="event.stopPropagation()" title="打开岗位页">↗</a>` : ''}</td>
       <td>${esc(j.position)}${j.tags.length ? `<br><span class="row-tags">${j.tags.map(esc).join(' · ')}</span>` : ''}</td>
       <td>${j.category ? `<span class="cat">${esc(j.category)}</span>` : ''}</td>
-      <td>${esc(j.location)}</td><td>${esc(j.salary)}</td>
+      <td>${j.recruit_type ? `<span class="rt">${esc(j.recruit_type)}</span>` : ''}</td>
+      <td><div class="locs">${(j.locations || []).map(c => {
+        const col = cityColor(c);
+        return `<span class="loc" style="color:${col};background:${col}1a;border-color:${col}40">${esc(c)}</span>`;
+      }).join('')}</div></td>
+      <td>${esc(j.salary)}</td>
       <td><span class="badge st-${esc(j.status)}">${esc(j.status)}</span>
         ${j.status_updated_at ? `<span class="sub-time">${esc(j.status_updated_at.slice(5))}</span>` : ''}</td>
       <td class="${j.deadline && j.deadline <= today && !['Offer','已拒绝','已归档'].includes(j.status) ? 'urgent' : ''}">${esc(j.deadline)}</td>
@@ -349,7 +390,7 @@ async function loadJobs() {
           ${d.statuses.map(s => `<option ${s === j.status ? 'disabled' : ''}>${esc(s)}</option>`).join('')}
         </select>
       </td>
-    </tr>`).join('') || '<tr><td colspan="9"><div class="empty">没有符合条件的岗位</div></td></tr>';
+    </tr>`).join('') || '<tr><td colspan="11"><div class="empty">没有符合条件的岗位</div></td></tr>';
 }
 
 async function quickStatus(id, status) {
@@ -381,7 +422,7 @@ async function syncRepo() {
   loadJobs();
 }
 
-const SHARED_INPUTS = ['company','position','url','location','salary','source','deadline','notes','jd'];
+const SHARED_INPUTS = ['company','position','url','salary','source','deadline','notes','jd'];
 
 // 让 select 能装下枚举外的存量值：不补这个临时项的话，读回来是空串，
 // 一保存就把合作者写的分类/状态抹掉了
@@ -407,7 +448,9 @@ async function openEdit(id) {
   const dl = document.getElementById('e-deadline');
   dl.type = (!j.deadline || /^\d{4}-\d{2}-\d{2}$/.test(j.deadline)) ? 'date' : 'text';
   dl.value = j.deadline || '';
+  document.getElementById('e-locations').value = (j.locations || []).join(', ');
   fillSelect(document.getElementById('e-category'), CATEGORIES, j.category, '（未分类）');
+  fillSelect(document.getElementById('e-recruit_type'), RECRUIT_TYPES, j.recruit_type, '（未标注）');
   fillSelect(document.getElementById('e-status'), STATUSES, j.status || '待投递', null);
   document.getElementById('e-my_notes').value = j.my_notes || '';
   document.getElementById('e-tags').value = (j.tags || []).join(', ');
@@ -422,7 +465,10 @@ async function saveJob() {
     const body = {base_rev: editingBase};
     for (const k of SHARED_INPUTS) body[k] = document.getElementById('e-' + k).value.trim();
     body.category = document.getElementById('e-category').value;
-    body.tags = document.getElementById('e-tags').value.split(/[,，]/).map(s => s.trim()).filter(Boolean);
+    body.recruit_type = document.getElementById('e-recruit_type').value;
+    const split = id => document.getElementById(id).value.split(/[,，]/).map(s => s.trim()).filter(Boolean);
+    body.locations = split('e-locations');
+    body.tags = split('e-tags');
     body.status = document.getElementById('e-status').value;
     body.my_notes = document.getElementById('e-my_notes').value.trim();
     if (editingId) {

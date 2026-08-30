@@ -84,7 +84,7 @@ def write_raw(name, obj):
 
 
 # 前端 saveJob 实际发送的字段集合 —— 测 PUT 必须用这个形态，否则测不出真实契约
-FRONTEND_FIELDS = ["company", "position", "url", "location", "salary", "source",
+FRONTEND_FIELDS = ["company", "position", "url", "salary", "source",
                    "deadline", "notes", "jd"]
 
 
@@ -96,6 +96,8 @@ def frontend_body(job, **override):
     """
     body = {k: (job.get(k) or "") for k in FRONTEND_FIELDS}
     body["category"] = job.get("category") or ""
+    body["recruit_type"] = job.get("recruit_type") or ""
+    body["locations"] = list(job.get("locations") or [])
     body["tags"] = list(job.get("tags") or [])
     body["status"] = job.get("status") or "待投递"
     body["my_notes"] = job.get("my_notes") or ""
@@ -141,7 +143,7 @@ threading.Thread(target=SRV.serve_forever, daemon=True).start()
 # ---- 2. 共享层与个人层互不干扰 ---------------------------------------------
 print("\n【2】共享/个人分层")
 jid = add(company="测试公司", position="算法工程师", category="算法",
-          location="北京", tags=["校招", "AI4S"], notes="公共情报",
+          locations=["北京"], tags=["校招", "AI4S", "急招"], notes="公共情报",
           status="已投递", my_notes="我的私密备注", jd="需要熟悉 PyTorch 与分布式训练")
 path = TMP / "jobs" / f"{jid}.json"
 saved = json.loads(path.read_text(encoding="utf-8"))
@@ -214,10 +216,10 @@ check(sp_id in ids(query(status="已归档")), "带空格的已归档岗位能�
 print("\n【4】并发编辑保护")
 _, j = req("GET", "/api/jobs/精简岗位")
 stale = frontend_body(j)                       # 模拟另一个标签页里打开的旧快照
-req("PUT", "/api/jobs/精简岗位", frontend_body(j, location="上海"))   # 别处先改了
+req("PUT", "/api/jobs/精简岗位", frontend_body(j, locations=["上海"]))  # 别处先改了
 code, d = req("PUT", "/api/jobs/精简岗位", {**stale, "salary": "99K"})
 check(code == 409 and d.get("conflict"), "拿着过期快照保存 → 409 冲突，而不是静默覆盖")
-check(json.loads(mini.read_text(encoding="utf-8"))["location"] == "上海",
+check(json.loads(mini.read_text(encoding="utf-8"))["locations"] == ["上海"],
       "冲突时先前的改动被保住")
 code, d = req("PUT", "/api/jobs/精简岗位", {"salary": "1K"})
 check(code == 400, "改共享字段却不带 base_rev → 400（乐观锁不能被静默跳过）")
@@ -279,7 +281,7 @@ check(ids(query(deadline_before="2026-09-10")) == {"没补零岗位"}, "归一�
 # ---- 8. 标签与维度值归一 ---------------------------------------------------
 print("\n【8】标签归一")
 write_raw("字符串标签岗位.json", {"id": "字符串标签岗位", "company": "戊 ", "position": "戊岗",
-                                "location": "北京 ", "tags": "校招, AI4S",
+                                "locations": ["北京 "], "tags": "校招, AI4S",
                                 "created_at": "2026-01-01 10:00", "updated_at": "2026-01-01 10:00"})
 req("POST", "/api/reindex")
 f8 = query()["facets"]
@@ -291,29 +293,48 @@ check(ids(query(tag="AI4S")) >= {"字符串标签岗位"},
       "手写成字符串的 tags 里，第一个之后的标签也筛得出来")
 _, j8 = req("GET", "/api/jobs/字符串标签岗位")
 check(isinstance(j8["tags"], list), "单条 GET 返回的 tags 也是数组（前端 join 不会炸）")
-check(server.norm_tags(["A,B"]) == ["A B"], "标签内的逗号被替换，不破坏整词匹配")
+check(server.norm_list(["A,B"]) == ["A B"], "标签内的逗号被替换，不破坏整词匹配")
 
 # ---- 9. 筛选语义 -----------------------------------------------------------
 print("\n【9】分类与标签筛选")
-a = add(company="A公司", position="后端开发", category="后端", location="杭州", tags=["社招"])
-b = add(company="B公司", position="量化研究员", category="量化", location="上海",
+a = add(company="A公司", position="后端开发", category="后端", locations=["杭州"], tags=["社招"])
+b = add(company="B公司", position="量化研究员", category="量化", locations=["上海"],
         tags=["校招", "算法"])
-c = add(company="C公司", position="数据挖掘", category="数据", location="杭州",
+c = add(company="C公司", position="数据挖掘", category="数据", locations=["杭州"],
         tags=["算法工程", "50%远程"])
 # 对照组：不转义 LIKE 通配符的话，下面几条查询会把它们一起捞出来
-e = add(company="E公司", position="对照岗", category="数据", location="厦门",
+e = add(company="E公司", position="对照岗", category="数据", locations=["厦门"],
         tags=["50X远程", "内招"], notes="团队 100 人全远程")
-g = add(company="G公司", position="下划线岗", category="数据", location="厦门", tags=["_招"])
-d_id = add(company="D公司", position="归档岗", category="后端", location="北京", tags=["社招"])
+g = add(company="G公司", position="下划线岗", category="数据", locations=["厦门"], tags=["_招"])
+d_id = add(company="D公司", position="归档岗", category="后端", locations=["北京"], tags=["社招"])
 req("POST", f"/api/jobs/{U(d_id)}/status", {"status": "已归档"})
 
 check(ids(query(category="后端")) == {a, d_id}, "按分类筛选")
 # 「精简岗位」在第 4 节被改成了上海，这里一并算进期望值
 check(ids(query(("location", "杭州"), ("location", "上海"))) == {a, b, c, "精简岗位"},
       "同一维度多值取 OR（杭州 或 上海）")
+# 多地可选的岗位：任选其一都应该能筛到它
+multi = add(company="多地公司", position="多地岗", category="研究",
+            locations=["深圳", "北京", "上海"], recruit_type="校招")
+check(multi in ids(query(location="深圳")) and multi in ids(query(location="北京"))
+      and multi in ids(query(location="上海")), "多地可选的岗位在每个城市都筛得到")
+check(multi not in ids(query(location="杭州")), "没写的城市不会误命中")
+_, jm2 = req("GET", f"/api/jobs/{U(multi)}")
+check(jm2["locations"] == ["深圳", "北京", "上海"], "多个地点原样保留，不再只留第一个")
+check("深圳" in query()["facets"]["location"] and "上海" in query()["facets"]["location"],
+      "地点候选项从多值列里拆出来")
+check(ids(query(recruit_type="校招")) >= {multi}, "招聘类型可以单独筛")
+code, _ = req("POST", "/api/jobs", {"company": "X", "position": "Y", "recruit_type": "瞎写"})
+check(code == 400, "非法 recruit_type 被拒绝")
 check(ids(query(category="后端", location="杭州")) == {a}, "不同维度之间取 AND")
-check(ids(query(("tag", "校招"), ("tag", "AI4S"))) == {jid, "字符串标签岗位"},
-      "多个标签取 AND（同时具备）")
+check(ids(query(("tag", "AI4S"), ("tag", "急招"))) == {jid}, "多个标签取 AND（同时具备）")
+# 「校招」这类招聘类型已经迁到 recruit_type，不该再出现在标签维度里
+check(ids(query(tag="校招")) == set(), "招聘类型不再留在标签里（已迁到 recruit_type）")
+check("校招" not in query()["facets"]["tags"], "标签候选项里没有招聘类型")
+check(not ({"北京", "上海", "深圳", "杭州"} & set(query()["facets"]["tags"])),
+      "标签候选项里没有城市名（已迁到 locations）")
+check(ids(query(recruit_type="校招")) >= {jid, "字符串标签岗位"},
+      "迁移后按 recruit_type 能筛到原先用标签标注的岗位")
 check(ids(query(tag="算法")) == {b}, "标签整词匹配：「算法」不误命中「算法工程」")
 check(d_id not in ids(query(hide_archived="1")), "隐藏已归档生效")
 check(ids(query(hide_archived="1", status="已归档")) == {d_id, sp_id},

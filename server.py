@@ -128,28 +128,42 @@ STATUSES = ["待投递", "已投递", "笔试", "面试", "Offer", "已拒绝", 
 # 注意：枚举外的存量值不会被清掉，前端会把它当成临时选项显示出来。
 CATEGORIES = ["算法", "研究", "数据", "量化", "后端", "Infra", "前端", "硬件", "产品", "其他"]
 
+# 招聘类型：独立成一个维度，不要混进 tags —— 「校招」和「AI4S」不是同一类东西
+RECRUIT_TYPES = ["校招", "社招", "实习"]
+
+# 常见工作地点。只用于一次性迁移：早期版本把多城市塞进了 tags，靠这张表把它们
+# 识别出来归位到 locations。日常录入直接写 locations 字段，不依赖这张表。
+KNOWN_CITIES = ["北京", "上海", "深圳", "杭州", "广州", "成都", "南京", "苏州", "武汉",
+                "西安", "香港", "厦门", "天津", "重庆", "长沙", "青岛", "大连", "合肥",
+                "珠海", "无锡", "澳门", "台北", "新加坡", "东京", "首尔", "伦敦",
+                "纽约", "西雅图", "远程"]
+
 # 共享字段 —— 写进 jobs/<id>.json，随 git 同步给所有人
-SHARED_FIELDS = ["company", "position", "category", "url", "location", "salary",
-                 "source", "deadline", "tags", "notes", "jd"]
+# locations 是数组：一个岗位常常多地可选，塞进单值字段会丢信息
+SHARED_FIELDS = ["company", "position", "category", "recruit_type", "url", "locations",
+                 "salary", "source", "deadline", "tags", "notes", "jd"]
 # 个人字段 —— 写进 local/status.json，只留在本机
 LOCAL_FIELDS = ["status", "my_notes"]
 # JSON 落盘的字段顺序：固定下来，多人协作时 git diff 才干净
 JSON_ORDER = ["id"] + SHARED_FIELDS + ["created_at", "updated_at"]
 
 # sqlite 索引表的列。改这里不需要迁移脚本 —— reindex 会 DROP 重建整张表。
-INDEX_COLUMNS = ["id", "company", "position", "category", "location", "salary",
-                 "source", "deadline", "tags", "notes", "jd",
+INDEX_COLUMNS = ["id", "company", "position", "category", "recruit_type", "locations",
+                 "salary", "source", "url", "deadline", "tags", "notes", "jd",
                  "status", "my_notes", "status_updated_at", "updated_at", "created_at"]
-# 列表接口返回的列：不含 jd/notes 这类大字段，它们只参与关键词搜索
-LIST_COLUMNS = ["id", "company", "position", "category", "location", "salary", "source",
-                "status", "deadline", "tags", "my_notes", "status_updated_at",
-                "updated_at", "created_at"]
-# 可按精确取值筛选的维度（同一维度内多值取 OR）
-FILTER_COLUMNS = ["status", "company", "location", "position", "category", "source"]
-# 生成筛选下拉候选项的维度
-FACET_COLUMNS = ["company", "location", "position", "category", "source"]
+# 列表接口返回的列：不含 jd/notes 这类大字段，它们只参与关键词搜索。
+# url 要返回 —— 列表里的公司名是可以直接点开岗位页的外链。
+LIST_COLUMNS = ["id", "company", "position", "category", "recruit_type", "locations",
+                "salary", "source", "url", "status", "deadline", "tags", "my_notes",
+                "status_updated_at", "updated_at", "created_at"]
+# 单值维度：精确等值筛选（同一维度内多值取 OR）
+FILTER_COLUMNS = ["status", "company", "position", "category", "recruit_type", "source"]
+# 多值列：索引层存成逗号拼接串，筛选走整词匹配，facets 拆开统计
+MULTI_COLUMNS = ["locations", "tags"]
+# 生成筛选下拉候选项的单值维度（多值列的候选项另外算）
+FACET_COLUMNS = ["company", "position", "category", "recruit_type", "source"]
 # 入库前需要 strip 的文本维度（查询侧也 strip，两边必须对称，否则永远筛不出来）
-STRIP_COLUMNS = ["company", "position", "category", "location", "source", "status"]
+STRIP_COLUMNS = ["company", "position", "category", "recruit_type", "source", "status"]
 
 CV_PROMPT = """请阅读我提供的 CV，生成一份「CV 解读文件」，保存为 cv/<名字>.reading.md，格式严格如下：
 
@@ -178,10 +192,10 @@ def norm_text(v):
     return (v or "").strip() if isinstance(v, str) else ("" if v is None else str(v).strip())
 
 
-def norm_tags(v):
-    """标签归一：接受 list 或逗号分隔字符串，去空白、去空项、去重。
+def norm_list(v):
+    """多值字段归一（locations / tags）：接受 list 或逗号分隔字符串，去空白、去空项、去重。
 
-    索引层把标签存成逗号拼接串，所以标签自身不能含逗号 —— 含了就换成空格，
+    索引层把它们存成逗号拼接串，所以单个取值自身不能含逗号 —— 含了就换成空格，
     否则整词匹配会失效（存 ["A,B"] 时 tag=A / tag=B / tag=A,B 会全部命中）。
     """
     if isinstance(v, str):
@@ -332,8 +346,9 @@ def save_job(job):
     p = job_path(job.get("id"))
     if not p:
         raise ValueError(f"非法的岗位 id：{job.get('id')!r}")
-    if "tags" in job:
-        job["tags"] = norm_tags(job["tags"])
+    for k in MULTI_COLUMNS:
+        if k in job:
+            job[k] = norm_list(job[k])
     write_json_atomic(p, ordered_job(job))
 
 
@@ -394,46 +409,121 @@ def merge_local(job, table=None):
         rec = {}
     merged = dict(job)
     merged["_rev"] = job_rev(job)                 # 前端保存时回传，用于冲突检测
-    merged["tags"] = norm_tags(job.get("tags"))   # 列表接口和单条接口的类型必须一致
+    for k in MULTI_COLUMNS:                       # 列表接口和单条接口的类型必须一致
+        merged[k] = norm_list(job.get(k))
     merged["status"] = rec.get("status") or "待投递"
     merged["my_notes"] = rec.get("my_notes", "")
     merged["status_updated_at"] = rec.get("updated_at", "")
     return merged
 
 
-def migrate_status():
-    """把旧版共享 JSON 里的 status/my_notes 搬进个人状态文件。
+def _upgrade_shared(job):
+    """把一条旧格式的共享岗位升级到当前字段结构。返回 True 表示确实改了。
 
-    幂等：已经迁移过的文件不含这些字段，直接跳过。合作者用旧版本写出的
-    带 status 的 JSON 被 pull 下来后，也会在下次启动时自动清理。
-    返回被迁移的岗位 id 列表。
+    处理三件事（都幂等）：
+      1. location（单值字符串）→ locations（数组）—— 一个岗位常常多地可选，
+         单值字段只能存第一个，其余信息就丢了
+      2. tags 里混进来的城市名移除 —— 它们已经在 locations 里，重复出现会污染标签栏
+      3. tags 里的招聘类型（校招/社招/实习）移到 recruit_type —— 「校招」和「AI4S」
+         不是同一类东西，混在一个标签栏里没法用
+    """
+    changed = False
+    if "location" in job:
+        locs = norm_list(job.pop("location"))
+        job["locations"] = norm_list(list(job.get("locations") or []) + locs)
+        changed = True
+    locs = norm_list(job.get("locations"))
+    keep, rt = [], norm_text(job.get("recruit_type"))
+    for t in norm_list(job.get("tags")):
+        if t in locs:                      # 城市已经在 locations 里了，去重
+            changed = True
+        elif t in KNOWN_CITIES:            # 早期版本把多城市塞进了 tags，归位
+            locs.append(t)
+            changed = True
+        elif t in RECRUIT_TYPES:
+            if not rt:
+                rt = t                     # 招聘类型提升为独立字段
+            changed = True
+        else:
+            keep.append(t)
+    if changed:
+        job["tags"] = keep
+        job["locations"] = locs
+        if rt:
+            job["recruit_type"] = rt
+    return changed
+
+
+def migrate():
+    """把旧版共享 JSON 升级到当前结构（幂等），返回被改动的岗位 id 列表。
+
+    两类升级：
+      - status / my_notes 搬进个人状态文件（私人数据，不该进 git）
+      - 共享字段的结构升级，见 _upgrade_shared
+
+    合作者用旧版本写出的 JSON 被 pull 下来后，也会在下次启动时自动处理。
     """
     moved = []
     # 也要拿 _JOBS_LOCK：这个函数会重写共享 JSON，和 POST/PUT 走的是同一批文件
     with _JOBS_LOCK, _LOCAL_LOCK, local_lock():
         table = read_local_strict()
+        local_dirty = False
         for f in sorted(JOBS_DIR.glob("*.json")):
             job = load_json(f)
             if not isinstance(job, dict):
                 continue
-            stale = [k for k in LOCAL_FIELDS if k in job]
-            if not stale:
-                continue
             jid = norm_text(job.get("id")) or f.stem
-            # 本地已有记录以本地为准，只从共享文件里摘掉字段，避免覆盖自己的真实进度
-            if jid not in table:
-                rec = {k: job[k] for k in stale}
-                rec["updated_at"] = job.get("updated_at", now())
-                table[jid] = rec
-            for k in stale:
-                job.pop(k)
+            stale = [k for k in LOCAL_FIELDS if k in job]
+            if stale:
+                # 本地已有记录以本地为准，只从共享文件里摘掉字段，避免覆盖真实进度
+                if jid not in table:
+                    rec = {k: job[k] for k in stale}
+                    rec["updated_at"] = job.get("updated_at", now())
+                    table[jid] = rec
+                    local_dirty = True
+                for k in stale:
+                    job.pop(k)
+            if not (stale or _upgrade_shared(job)):
+                continue
             job["id"] = jid
             # 按文件原路径写回（文件名可能和 id 不一致），并保留未知字段
             write_json_atomic(f, ordered_job(job))
             moved.append(jid)
-        if moved:
+        if local_dirty:
             write_json_atomic(local_path(), table)
     return moved
+
+
+migrate_status = migrate   # 旧名字，保持向后兼容
+
+
+def split_tag_fields(data):
+    """把请求里误写进 tags 的城市与招聘类型归位到各自的字段。
+
+    写入侧也要做这件事，否则「新增时写进 tags 的校招」会一直留到下次 reindex 才被
+    迁移清理，两条路径的行为不一致。
+
+    城市只在请求同时提交了 locations 时才归位 —— PUT 是部分更新，不能因为整理
+    tags 就把请求里没提到的 locations 冲掉；没法安全归位时就留在 tags 里，交给
+    migrate 兜底。
+    """
+    if "tags" not in data:
+        return
+    keep, cities, rt = [], [], norm_text(data.get("recruit_type"))
+    for t in norm_list(data["tags"]):
+        if t in KNOWN_CITIES:
+            cities.append(t)
+        elif t in RECRUIT_TYPES:
+            rt = rt or t
+        else:
+            keep.append(t)
+    if rt:
+        data["recruit_type"] = rt
+    if cities and "locations" in data:
+        data["locations"] = norm_list(list(data["locations"] or []) + cities)
+    else:
+        keep.extend(cities)
+    data["tags"] = keep
 
 
 # ---------------------------------------------------------------- 索引层：sqlite
@@ -457,8 +547,8 @@ def upsert_index(conn, merged):
     row = []
     for c in INDEX_COLUMNS:
         v = merged.get(c, "")
-        if c == "tags":
-            v = ",".join(norm_tags(v))
+        if c in MULTI_COLUMNS:
+            v = ",".join(norm_list(v))
         elif c == "deadline":
             v = norm_date(v)
         elif c in STRIP_COLUMNS:
@@ -506,6 +596,8 @@ def reindex():
             if norm_text(job.get("deadline")) and not norm_date(job.get("deadline")):
                 warnings.append(f"{f.name}：截止日期「{job['deadline']}」格式无法识别，"
                                 f"该岗位不会出现在按截止日期的筛选里（应为 YYYY-MM-DD）")
+            if job.get("recruit_type") and norm_text(job["recruit_type"]) not in RECRUIT_TYPES:
+                warnings.append(f"{f.name}：招聘类型「{job['recruit_type']}」不在本版本枚举内，已保留原值")
             if job.get("category") and norm_text(job["category"]) not in CATEGORIES:
                 warnings.append(f"{f.name}：分类「{job['category']}」不在本版本枚举内，"
                                 f"已保留原值（筛选下拉里可以选到它）")
@@ -540,7 +632,15 @@ def list_jobs(query):
         if vs:
             sql += f" AND {key} IN ({','.join('?' * len(vs))})"
             args += vs
-    # 标签存成逗号拼接串，两侧补逗号后做整词匹配，避免「算法」命中「算法工程」
+    # 地点是多值列（一个岗位可能多地可选）。同维度多个取值取 OR：
+    # 选了「上海」和「深圳」= 这两地任意一个能去的岗位。
+    locs = vals("location")
+    if locs:
+        sql += " AND (" + " OR ".join(
+            "(','||locations||',') LIKE ? ESCAPE '\\'" for _ in locs) + ")"
+        args += [f"%,{_like(v)},%" for v in locs]
+    # 标签也是多值列，但多个取值取 AND：勾了两个标签＝两个都得有。
+    # 两侧补逗号做整词匹配，避免「算法」命中「算法工程」。
     for t in vals("tag"):
         sql += " AND (','||tags||',') LIKE ? ESCAPE '\\'"
         args.append(f"%,{_like(t)},%")
@@ -553,7 +653,8 @@ def list_jobs(query):
         sql += " AND status!='已归档'"
     q = one("q")
     if q:
-        cols = ["company", "position", "location", "category", "tags", "notes", "jd", "my_notes"]
+        cols = ["company", "position", "locations", "category", "recruit_type",
+                "tags", "notes", "jd", "my_notes"]
         sql += " AND (" + " OR ".join(f"{c} LIKE ? ESCAPE '\\'" for c in cols) + ")"
         args += [f"%{_like(q)}%"] * len(cols)
     # 加次级排序键：updated_at 只精确到分钟，同分钟的多条否则顺序不定
@@ -565,18 +666,22 @@ def list_jobs(query):
         # 各维度已有取值：供筛选下拉与新增岗位时的输入建议（鼓励复用已有写法）
         facets = {c: [r[0] for r in conn.execute(
             f"SELECT DISTINCT {c} FROM jobs WHERE {c}!='' ORDER BY {c}")] for c in FACET_COLUMNS}
-        tags = set()
-        for (t,) in conn.execute("SELECT tags FROM jobs WHERE tags!=''"):
-            tags.update(x for x in t.split(",") if x)
-        facets["tags"] = sorted(tags)
+        # 多值列的候选项要拆开统计。地点的 facet key 用单数 location，
+        # 和查询参数名保持一致（?location=上海）。
+        for col, key in (("locations", "location"), ("tags", "tags")):
+            vs = set()
+            for (v,) in conn.execute(f"SELECT {col} FROM jobs WHERE {col}!=''"):
+                vs.update(x for x in v.split(",") if x)
+            facets[key] = sorted(vs)
     finally:
         conn.close()
-    # 枚举外的存量分类也要能筛（比如合作者跑着更新的版本，加了新方向）
-    facets["category"] = sorted(set(facets["category"]) | set(CATEGORIES),
-                                key=lambda c: (c not in CATEGORIES, CATEGORIES.index(c)
-                                               if c in CATEGORIES else 0, c))
+    # 枚举外的存量取值也要能筛（比如合作者跑着更新的版本，加了新方向）
+    for key, enum in (("category", CATEGORIES), ("recruit_type", RECRUIT_TYPES)):
+        facets[key] = sorted(set(facets[key]) | set(enum),
+                             key=lambda v: (v not in enum, enum.index(v) if v in enum else 0, v))
     for r in rows:
-        r["tags"] = [t for t in (r.get("tags") or "").split(",") if t]
+        for k in MULTI_COLUMNS:
+            r[k] = [x for x in (r.get(k) or "").split(",") if x]
     return {"jobs": rows, "facets": facets}
 
 
@@ -683,7 +788,7 @@ def git_sync():
                 "请到终端处理这些文件里的冲突标记，然后 git add，再 git stash drop。\n"
                 "在处理完之前，这些岗位在列表里是看不到的。\n\n" + out}
 
-    migrate_status()
+    migrate()
     return {"ok": True, "message": out, **reindex()}
 
 
@@ -756,6 +861,9 @@ class Handler(BaseHTTPRequestHandler):
         c = norm_text(data.get("category"))
         if c and c not in CATEGORIES:
             return f"category 必须是以下之一：{'/'.join(CATEGORIES)}"
+        r = norm_text(data.get("recruit_type"))
+        if r and r not in RECRUIT_TYPES:
+            return f"recruit_type 必须是以下之一：{'/'.join(RECRUIT_TYPES)}"
         s = norm_text(data.get("status"))
         if s and s not in STATUSES:
             return f"status 必须是以下之一：{'/'.join(STATUSES)}"
@@ -776,9 +884,9 @@ class Handler(BaseHTTPRequestHandler):
             if k not in data:
                 continue
             new, old = data[k], job.get(k)
-            if k == "tags":
-                if norm_tags(new) != norm_tags(old):
-                    out[k] = norm_tags(new)
+            if k in MULTI_COLUMNS:
+                if norm_list(new) != norm_list(old):
+                    out[k] = norm_list(new)
             elif (new or "") != (old or ""):
                 out[k] = new
         return out
@@ -793,7 +901,8 @@ class Handler(BaseHTTPRequestHandler):
             return self.send_file(WEB_DIR / "index.html", "text/html; charset=utf-8")
         if path == "/api/jobs":
             d = list_jobs(query)
-            return self.send_json({**d, "statuses": STATUSES, "categories": CATEGORIES})
+            return self.send_json({**d, "statuses": STATUSES, "categories": CATEGORIES,
+                                   "recruit_types": RECRUIT_TYPES})
         m = re.fullmatch(r"/api/jobs/([^/]+)", path)
         if m:
             job = load_shared(m.group(1))
@@ -827,12 +936,13 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         path = urllib.parse.unquote(urllib.parse.urlparse(self.path).path)
         if path == "/api/reindex":
-            migrate_status()
+            migrate()
             return self.send_json({"ok": True, **reindex()})
         if path == "/api/sync":
             return self.send_json(git_sync())
         if path == "/api/jobs":
             data = self.read_body()
+            split_tag_fields(data)
             if not norm_text(data.get("company")) or not norm_text(data.get("position")):
                 return self.send_json({"error": "company 和 position 必填"}, 400)
             err = self.bad_values(data)
@@ -845,7 +955,8 @@ class Handler(BaseHTTPRequestHandler):
                 jid, i = base, 2
                 while (JOBS_DIR / f"{jid}.json").exists():
                     jid, i = f"{base}-{i}", i + 1
-                job = {"id": jid, "tags": [], "created_at": now(), "updated_at": now()}
+                job = {"id": jid, "locations": [], "tags": [],
+                       "created_at": now(), "updated_at": now()}
                 for k in SHARED_FIELDS:
                     if k in data:
                         job[k] = data[k]
@@ -880,6 +991,7 @@ class Handler(BaseHTTPRequestHandler):
         if not job:
             return self.send_json({"error": "not found"}, 404)
         data = self.read_body()
+        split_tag_fields(data)
         err = self.bad_values({k: data[k] for k in LOCAL_FIELDS if k in data})
         if err:
             return self.send_json({"error": err}, 400)
@@ -936,13 +1048,14 @@ def main():
                  f"请检查 {CONFIG_PATH} 里的 data_dir，或先跑一次：python install.py")
 
     try:
-        moved = migrate_status()
+        moved = migrate()
     except LocalStateError as e:
         # 只读路径本来就能降级，不该因为写不了就连岗位列表都打不开
         print(f"⚠️  {e}\n服务器照常启动，但个人层是只读的：列表能看，改状态会报错。")
         moved = []
     if moved:
-        print(f"已把 {len(moved)} 条岗位的投递状态从共享 JSON 迁到本地：{local_path()}")
+        print(f"已升级 {len(moved)} 条岗位的数据格式（投递状态搬到 {local_path()}；"
+              f"地点改为多值字段；标签里的城市与招聘类型归位）")
 
     r = reindex()
     for line in r["skipped"]:

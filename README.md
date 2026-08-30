@@ -19,15 +19,24 @@ cv/                CV 原文 + <名字>.reading.md 解读文件（格式见 cv/R
 
 | | 共享（进 git） | 个人（不进 git） |
 |---|---|---|
-| 字段 | `company / position / category / url / location / salary / source / deadline / tags[] / notes / jd` | `status / my_notes` |
+| 字段 | `company / position / category / recruit_type / url / locations[] / salary / source / deadline / tags[] / notes / jd` | `status / my_notes` |
 | 含义 | 客观招聘信息 + 对大家都有用的公共备注（如「内推码到 9 月底」「卡 985」） | 我投到哪一步了、我自己的记录 |
 | 谁能看到 | 所有合作者 | 只有本机 |
 
-岗位分类 `category` 是**受控枚举**（粗粒度，下拉不会爆炸）：
-`算法 / 研究 / 数据 / 量化 / 后端 / Infra / 前端 / 硬件 / 产品 / 其他`
-要加新方向就改 `server.py` 里的 `CATEGORIES`，前后端同时生效。
+三个维度各管各的，**不要混进 tags** —— 「上海」「校招」「AI4S」不是同一类东西，
+混在一个标签栏里就没法用了：
 
-`tags[]` 是**自由标签**（细粒度，可多选筛选），如 `校招 / 实习 / 远程 / 急招 / AI4S`。
+| 维度 | 字段 | 取值 | 筛选语义 |
+|---|---|---|---|
+| 工作地点 | `locations[]` | 自由，多值 | 选「上海」能筛出**所有可在上海**的岗位；多选取 **OR** |
+| 招聘类型 | `recruit_type` | 受控枚举：`校招 / 社招 / 实习` | 单选 |
+| 岗位分类 | `category` | 受控枚举：`算法 / 研究 / 数据 / 量化 / 后端 / Infra / 前端 / 硬件 / 产品 / 其他` | 单选 |
+| 主题属性 | `tags[]` | 自由，多值 | 多选取 **AND**（同时具备），如 `AI4S / 2027届 / 分子动力学` |
+
+`locations` 是数组：一个岗位常常多地可选（如「深圳、北京、上海」），单值字段会丢信息。
+列表页把它渲染成彩色 chip，城市与颜色固定对应，方便扫视。
+
+枚举要加值就改 `server.py` 里的 `CATEGORIES` / `RECRUIT_TYPES`，前后端同时生效。
 
 状态枚举：`待投递 / 已投递 / 笔试 / 面试 / Offer / 已拒绝 / 已归档`（只归档，不删除）
 
@@ -62,6 +71,10 @@ python install.py --data-dir "D:\jobs-data" --cv-dir "~/Documents/my-cv"
 > 手写的。凡是本版本「枚举里没有 / 控件装不下 / 解析不了」的值，一律**保留并告警**，
 > 绝不静默归零 —— 分类会照常出现在筛选下拉里，编辑框里会标注「本版本枚举外，保留原值」，
 > 格式不对的截止日期会在重建索引时报出来。
+
+> 字段结构升级（同样自动、幂等）：旧的单值 `location` 会变成 `locations` 数组；
+> 早期版本混进 `tags` 的城市名和招聘类型，会分别归位到 `locations` 和 `recruit_type`。
+> 城市名靠 `server.py` 里的 `KNOWN_CITIES` 表识别，这张表只在迁移时用到。
 
 ## 启动
 
@@ -109,12 +122,14 @@ python install.py --data-dir "D:\jobs-data" --cv-dir "~/Documents/my-cv"
 1. 新增/修改岗位：直接编辑 `jobs/*.json`（只写共享字段，**不要写 `status` /
    `my_notes`**），然后运行 `python server.py --reindex` 重建索引；若服务器正在
    运行，也可在 WebUI 点「↻ 重建索引」或 `curl -X POST localhost:8770/api/reindex`。
-2. **取值复用**：`company / location / position / category / source / tags` 都是
-   筛选维度，新增岗位前先查已有取值（`GET /api/jobs` 返回的 `facets`，或直接扫
+2. **取值复用**：`company / locations / position / category / recruit_type / source / tags`
+   都是筛选维度，新增岗位前先查已有取值（`GET /api/jobs` 返回的 `facets`，或直接扫
    `jobs/*.json`），同类岗位必须复用已有写法（如已有「杭州」就不要写「杭州市」）；
    确属新方向时才引入新值，并保持命名风格一致（简洁、无空格、不加标点）。
-3. `category` 必须是上面列出的枚举之一，写错会被接口拒绝（400）。粗分类放
-   `category`，细特征放 `tags`。
+3. `category` 与 `recruit_type` 必须是枚举之一，写错会被接口拒绝（400）。
+   **城市写进 `locations`、招聘类型写进 `recruit_type`，不要写进 `tags`** ——
+   写错了接口会自动归位，但别指望它，一开始就写对。
+   多地可选的岗位把城市全列进 `locations`，不要只留第一个。
 4. 日期一律 `YYYY-MM-DD`，日期时间 `YYYY-MM-DD HH:mm`。
 5. 不删除历史岗位，把 `status` 改为 `已归档`（这是本地操作）。
 6. sqlite 只读查询随意；写入请改 JSON 后 reindex，避免两边不一致。
@@ -134,7 +149,7 @@ python install.py --data-dir "D:\jobs-data" --cv-dir "~/Documents/my-cv"
 
 | 方法 | 路径 | 说明 |
 |---|---|---|
-| GET | `/api/jobs?status=&company=&location=&position=&category=&source=&tag=&deadline_before=&q=&hide_archived=1` | 列表（读 sqlite 索引），响应含 `facets`（各维度已有取值）、`statuses`、`categories`。除 `deadline_before/q/hide_archived` 外，参数均可重复传多个值 |
+| GET | `/api/jobs?status=&company=&location=&position=&category=&recruit_type=&source=&tag=&deadline_before=&q=&hide_archived=1` | 列表（读 sqlite 索引），响应含 `facets`（各维度已有取值）、`statuses`、`categories`、`recruit_types`。除 `deadline_before/q/hide_archived` 外，参数均可重复传多个值；`location` 多值取 OR，`tag` 多值取 AND |
 | GET | `/api/jobs/<id>` | 单条完整 JSON（共享字段 + 本机状态的合并视图） |
 | POST | `/api/jobs` | 新增（company/position 必填）；`status`/`my_notes` 会被分流到本地 |
 | PUT | `/api/jobs/<id>` | 修改；共享字段**真的变了**才写 JSON 并更新 `updated_at`（空串与缺失字段视为相等，所以 no-op 保存不产生 git diff）。改共享字段必须带 `base_rev`（乐观锁，不匹配返回 409；`"*"` 强制覆盖），只改个人字段不需要 |
@@ -149,8 +164,9 @@ python install.py --data-dir "D:\jobs-data" --cv-dir "~/Documents/my-cv"
 python3 test_server.py
 ```
 
-用合成数据在临时目录里跑 83 条断言，不会碰你真实的 `jobs/` 与 `local/`。覆盖：
-数据分层与 no-op 保存不产生 diff、迁移幂等且保留未知字段、枚举外的值不被静默清空、
+用合成数据在临时目录里跑 93 条断言，不会碰你真实的 `jobs/` 与 `local/`。覆盖：
+数据分层与 no-op 保存不产生 diff、迁移幂等且保留未知字段、多地点筛选、
+枚举外的值不被静默清空、
 乐观锁冲突、个人状态文件损坏时拒绝写入、reindex 对坏文件/缺 id/重复 id 的报告、
 日期归一、标签归一、筛选语义、LIKE 通配符转义、异常转 500 JSON、CV 关键词解析，
 以及 git 同步（临时建一个 bare origin + 两个 clone，覆盖「工作区脏时能拉」
