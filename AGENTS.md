@@ -44,6 +44,11 @@ python server.py --reindex
 
 **禁止**：直接写 sqlite。它只用于只读查询，reindex 会覆盖一切手写改动。
 
+server 的所有写路径遵守一条全局锁序（详见 `server.py` 顶部注释）：
+`.sync.lock` → `.jobs.lock` → 进程内 RLock → `.status.lock`。新增写接口或改写
+路径时必须按这个顺序拿锁；个人状态的 flock 不可重入，不要在持它的 with 块里
+再取第二把。同一份数据目录同时只允许一个 server 实例（程序已强制）。
+
 ## 3. 数据规则（硬性）
 
 - **必填**：`id`、`company`、`position`。id 规则：有官方职位号用 `<公司>-<职位号小写>`，

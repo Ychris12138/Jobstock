@@ -18,6 +18,7 @@ import shutil
 import subprocess
 import tempfile
 import threading
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -111,6 +112,11 @@ def frontend_body(job, **override):
 TMP = Path(tempfile.mkdtemp(prefix="jobstock-test-"))
 server.configure(data_dir=str(TMP), cv_dir=str(TMP / "cv"))
 (TMP / "jobs").mkdir(parents=True)
+# server 自身也会跑 git（同步/推送/迁移广播）。给整个测试进程设上确定身份，
+# 否则在没有 git config 的机器（CI）上 server 侧的 commit 会失败。
+for _k, _v in (("GIT_AUTHOR_NAME", "t"), ("GIT_AUTHOR_EMAIL", "t@t.test"),
+               ("GIT_COMMITTER_NAME", "t"), ("GIT_COMMITTER_EMAIL", "t@t.test")):
+    os.environ.setdefault(_k, _v)
 
 # ---- 1. 迁移 --------------------------------------------------------------
 print("\n【1】旧数据迁移")
@@ -785,6 +791,75 @@ code, d = raw_http("PUT", "/api/jobs/精简岗位", {"Content-Type": "applicatio
 server.MAX_BODY = 5 * 1024 * 1024
 check(code == 400, "超过大小上限的请求体被拒绝")
 check(mini.read_bytes() == mini_before19, "被拒绝的请求一个字节都没写进共享 JSON")
+
+# ---- 20. 同步/写入互斥与单实例守卫 --------------------------------------------
+print("\n【20】同步/写入互斥与单实例守卫")
+GL2 = TMP / "locklab"
+GL2.mkdir()
+ORIGIN2 = GL2 / "origin.git"
+subprocess.run(["git", "init", "--bare", "-b", "main", str(ORIGIN2)], capture_output=True)
+LA = GL2 / "alice"
+git("clone", str(ORIGIN2), str(LA), cwd=GL2)
+write_job(LA, "锁岗", company="锁公司", position="锁岗位", salary="10K")
+git("add", "-A", cwd=LA)
+git("commit", "-m", "init", cwd=LA)
+git("push", "-u", "origin", "main", cwd=LA)
+server.configure(data_dir=str(LA), cv_dir=str(LA / "cv"))
+server.reindex()
+
+real_git20 = server._git
+pull_started = threading.Event()
+release_pull = threading.Event()
+
+
+def fake_pull_git(args, cwd, timeout=120):
+    """拦截 git pull：挂住等信号，然后模拟 checkout 改写工作区里的共享 JSON。"""
+    if args[0] == "pull":
+        pull_started.set()
+        release_pull.wait(60)
+        write_job(LA, "锁岗", company="锁公司", position="锁岗位", salary="99K")
+        return subprocess.CompletedProcess(args, 0, "Already up to date.", "")
+    return real_git20(args, cwd, timeout=timeout)
+
+
+server._git = fake_pull_git
+sync_result = {}
+ts = threading.Thread(target=lambda: sync_result.update(r=server.git_sync()))
+ts.start()
+check(pull_started.wait(15), "同步线程已进入 pull")
+put_result = {}
+tp = threading.Thread(target=lambda: put_result.update(
+    c=req("PUT", "/api/jobs/锁岗", {"salary": "50K", "base_rev": "*"})[0]))
+tp.start()
+time.sleep(1.5)    # 修复后 PUT 必须还卡在锁上；把锁退化掉的话它在这个窗口内早就完成了
+check(not put_result, "pull 进行期间，写请求被阻塞（不会并发改写共享 JSON）")
+release_pull.set()
+ts.join(30)
+tp.join(30)
+server._git = real_git20
+check(sync_result["r"]["ok"] is True, "同步正常完成")
+check(put_result.get("c") == 200, "被阻塞的 PUT 在同步完成后完成")
+final20 = json.loads((LA / "jobs" / "锁岗.json").read_text(encoding="utf-8"))
+check(final20["salary"] == "50K", "checkout 与 PUT 不再互相覆盖（最终内容 = PUT 基于拉取后数据的写入）")
+
+with server.FileLock(server.LOCAL_DIR / ".sync.lock", blocking=False):
+    r_busy = server.git_sync()
+check(r_busy["ok"] is False and "稍后再试" in r_busy["message"],
+      "已有同步进行时，新的同步请求立即被拒绝而不是排队")
+
+guard20 = server.FileLock(server.LOCAL_DIR / ".server.lock", blocking=False)
+guard20.__enter__()
+dup_rejected = False
+try:
+    server.acquire_instance_guard()
+except SystemExit:
+    dup_rejected = True
+finally:
+    guard20.__exit__()
+check(dup_rejected, "数据目录被占用时第二个实例拒绝启动（不再静默双开）")
+server.configure(data_dir=str(TMP / "guardlab"), cv_dir=str(TMP / "cv"))
+server.acquire_instance_guard()      # 成功路径：正常持有，进程剩余时间都算「这个实例」
+server.configure(data_dir=str(TMP), cv_dir=str(TMP / "cv"))
 
 SRV.shutdown()
 shutil.rmtree(TMP, ignore_errors=True)

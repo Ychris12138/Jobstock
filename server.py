@@ -43,9 +43,17 @@ LOCAL_DIR = ROOT / "local"
 CV_DIR = ROOT / "cv"
 DB_PATH = ROOT / "data" / "jobs.db"
 
-# 写锁：HTTP 服务是多线程的，两个请求同时写同一个文件会互相覆盖
+# 写锁。全局锁序（所有写路径必须一致遵守，否则死锁）：
+#   FileLock(LOCAL_DIR/".sync.lock")         同步/推送互斥（非阻塞，忙即拒绝）
+# → jobs_lock()                              共享层跨进程锁（可重入）
+# → _JOBS_LOCK（RLock）                      共享层进程内锁
+# → _LOCAL_LOCK（RLock）                     个人层进程内锁
+# → local_lock()＝FileLock(".status.lock")   个人层跨进程锁（最内层；flock 按
+#                                            打开的文件描述计，同进程不可重入，
+#                                            绝不在持它的 with 块里再取第二把）
 _LOCAL_LOCK = threading.RLock()   # 个人状态文件
 _JOBS_LOCK = threading.RLock()    # 共享岗位 JSON（尤其是新增时的 id 分配）
+_jobs_flock_depth = threading.local()
 
 
 class LocalStateError(Exception):
@@ -65,17 +73,25 @@ class BadRequest(Exception):
 MAX_BODY = 5 * 1024 * 1024
 
 
+class LockBusy(Exception):
+    """非阻塞模式下，锁被另一个进程持有。"""
+
+
 class FileLock:
     """跨进程文件锁。
 
     _LOCAL_LOCK 只在进程内有效，而「UI 开着又在终端跑了一次 --reindex」「起了第二个
     实例」「数据目录放在云盘上被两台机器写」都会让两个进程同时做读-改-写，
     实测 3 进程 × 60 次改状态会丢掉三分之一的更新，且完全静默。
-    拿不到锁时降级成只有进程内锁（总比直接失败好）。
+
+    blocking=True（默认）：拿不到锁时降级成只有进程内锁 —— 总比直接失败好，
+    但必须大声告警，不允许无声无息地降级。
+    blocking=False：拿不到锁立刻抛 LockBusy。同步/推送这类一拿就是几十秒的锁，
+    「排队等」不如「告诉你现在忙」。
     """
 
-    def __init__(self, path):
-        self.path, self.fh = path, None
+    def __init__(self, path, blocking=True):
+        self.path, self.fh, self.blocking = path, None, blocking
 
     def __enter__(self):
         self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -83,12 +99,19 @@ class FileLock:
             self.fh = open(self.path, "a+")
             if os.name == "nt":
                 import msvcrt
-                msvcrt.locking(self.fh.fileno(), msvcrt.LK_LOCK, 1)
+                msvcrt.locking(self.fh.fileno(),
+                               msvcrt.LK_LOCK if self.blocking else msvcrt.LK_NBLCK, 1)
             else:
                 import fcntl
-                fcntl.flock(self.fh.fileno(), fcntl.LOCK_EX)
-        except Exception:
-            pass
+                fcntl.flock(self.fh.fileno(),
+                            fcntl.LOCK_EX if self.blocking else fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except Exception as e:
+            if self.fh:
+                self.fh.close()
+                self.fh = None
+            if not self.blocking:
+                raise LockBusy(f"另一个进程正持有锁：{self.path}") from e
+            print(f"⚠️ 跨进程文件锁不可用（{e}），降级为仅进程内锁：{self.path}", file=sys.stderr)
         return self
 
     def __exit__(self, *exc):
@@ -110,6 +133,55 @@ class FileLock:
 
 def local_lock():
     return FileLock(LOCAL_DIR / ".status.lock")
+
+
+class _ReentrantJobsLock:
+    """jobs_lock() 的可重入代理：同线程嵌套进入时只有最外层真正加/解锁。"""
+
+    def __enter__(self):
+        d = getattr(_jobs_flock_depth, "d", 0)
+        if d == 0:
+            self._fl = FileLock(JOBS_DIR / ".jobs.lock")
+            self._fl.__enter__()
+        else:
+            self._fl = None
+        _jobs_flock_depth.d = d + 1
+        return self
+
+    def __exit__(self, *exc):
+        _jobs_flock_depth.d -= 1
+        if _jobs_flock_depth.d == 0 and self._fl:
+            self._fl.__exit__()
+
+
+def jobs_lock():
+    """共享层（jobs/*.json）的跨进程写锁，同线程可重入。
+
+    可重入是必需的：git_sync 全程持锁，其内部调用的 migrate / migrate_ids 也要
+    拿同一把锁 —— flock 按「打开的文件描述」计，同一进程开第二个 fd 再锁同一
+    文件会直接死锁，所以同线程的重复进入只在最外层真正加/解锁。
+    """
+    return _ReentrantJobsLock()
+
+
+_INSTANCE_GUARD = None
+
+
+def acquire_instance_guard():
+    """进程整个生命周期持有 .server.lock：同一份数据目录只允许一个实例。
+
+    以前靠 README 里一句「同时只跑一个 server」的自觉，而 Windows 的
+    SO_REUSEADDR 还允许同端口二次绑定 —— 双实例各自读写同一批 JSON，正是
+    静默丢状态的那条路径。拿不到锁直接退出，比双开好得多。
+    """
+    global _INSTANCE_GUARD
+    fl = FileLock(LOCAL_DIR / ".server.lock", blocking=False)
+    try:
+        fl.__enter__()
+    except LockBusy:
+        sys.exit(f"数据目录已被另一个 job-stock 实例占用：{LOCAL_DIR}\n"
+                 f"同一份数据同时只跑一个 server；先停掉旧的那个（关掉它的终端窗口即可）。")
+    _INSTANCE_GUARD = fl      # 保住引用，进程存活期间不释放；退出时由操作系统兜底
 
 
 def _resolve(p):
@@ -677,8 +749,8 @@ def migrate():
     合作者用旧版本写出的 JSON 被 pull 下来后，也会在下次启动时自动处理。
     """
     moved = []
-    # 也要拿 _JOBS_LOCK：这个函数会重写共享 JSON，和 POST/PUT 走的是同一批文件
-    with _JOBS_LOCK, _LOCAL_LOCK, local_lock():
+    # 也要拿共享层锁：这个函数会重写共享 JSON，和 POST/PUT 走的是同一批文件
+    with jobs_lock(), _JOBS_LOCK, _LOCAL_LOCK, local_lock():
         table = read_local_strict()
         local_dirty = False
         for f in sorted(JOBS_DIR.glob("*.json")):
@@ -742,7 +814,7 @@ def migrate_ids():
     不会引发改名 —— id 保持稳定，只有补上职位号时会换一次。
     """
     renamed = []
-    with _JOBS_LOCK:
+    with jobs_lock(), _JOBS_LOCK:
         for f in sorted(JOBS_DIR.glob("*.json")):
             job = load_json(f)
             if not isinstance(job, dict) or not norm_text(job.get("job_no")):
@@ -809,29 +881,32 @@ def merge_group(ids):
     共享层：空字段用其他条补齐；locations / tags 取并集；notes 内容不同就拼起来，
     宁可留着让人删，也不要悄悄丢掉别人写的情报。
     个人层：状态取走得最远的那个（见 STATUS_RANK），个人备注拼接。
+
+    岗位快照必须在**拿锁之后**读：锁外读到的快照可能在写回前被并发的 PUT 改掉，
+    用陈旧快照算出的合并结果写回 = 静默回滚别人刚保存的编辑。
     """
-    jobs = [j for j in (load_shared(i) for i in ids) if j]
-    if len(jobs) < 2:
-        return None, []
-    keep = _pick_survivor(jobs)
-    others = [j for j in jobs if j["id"] != keep["id"]]
+    with jobs_lock(), _JOBS_LOCK, _LOCAL_LOCK, local_lock():
+        jobs = [j for j in (load_shared(i) for i in ids) if j]
+        if len(jobs) < 2:
+            return None, []
+        keep = _pick_survivor(jobs)
+        others = [j for j in jobs if j["id"] != keep["id"]]
 
-    merged = dict(keep)
-    for j in others:
-        for k in SHARED_FIELDS:
-            if k in MULTI_COLUMNS:
-                merged[k] = norm_list(list(merged.get(k) or []) + list(j.get(k) or []))
-            elif k in BOOL_FIELDS:
-                # 取或：只要有一个人标了下架，合并后就是下架。漏标的代价是白点一次
-                # 链接，误清标记的代价是继续把它当活岗位准备材料
-                merged[k] = norm_bool(merged.get(k)) or norm_bool(j.get(k))
-            elif not norm_text(merged.get(k)) and norm_text(j.get(k)):
-                merged[k] = j[k]
-            elif k == "notes" and norm_text(j.get(k)) and norm_text(j[k]) not in norm_text(merged.get(k)):
-                merged[k] = f"{merged[k]}\n{j[k]}".strip()
-    merged["updated_at"] = now()
+        merged = dict(keep)
+        for j in others:
+            for k in SHARED_FIELDS:
+                if k in MULTI_COLUMNS:
+                    merged[k] = norm_list(list(merged.get(k) or []) + list(j.get(k) or []))
+                elif k in BOOL_FIELDS:
+                    # 取或：只要有一个人标了下架，合并后就是下架。漏标的代价是白点一次
+                    # 链接，误清标记的代价是继续把它当活岗位准备材料
+                    merged[k] = norm_bool(merged.get(k)) or norm_bool(j.get(k))
+                elif not norm_text(merged.get(k)) and norm_text(j.get(k)):
+                    merged[k] = j[k]
+                elif k == "notes" and norm_text(j.get(k)) and norm_text(j[k]) not in norm_text(merged.get(k)):
+                    merged[k] = f"{merged[k]}\n{j[k]}".strip()
+        merged["updated_at"] = now()
 
-    with _JOBS_LOCK, _LOCAL_LOCK, local_lock():
         table = read_local_strict()
         recs = [table.get(i) for i in ids if isinstance(table.get(i), dict)]
         if recs:
@@ -1165,6 +1240,10 @@ def git_sync():
 
     --autostash 是必需的：在 WebUI 里编辑过任何岗位后工作区就是脏的，
     不 autostash 的话 git 会以退出码 128 拒绝 rebase，同步按钮等于常年失效。
+
+    全程持有 .sync.lock（跨进程，非阻塞：已有同步/推送在进行就直接拒绝）与
+    共享/个人两层进程内锁 —— pull 的 checkout 会改写 jobs/*.json，不锁的话
+    和并发的 POST/PUT 互相覆盖，两边都以为自己的写入成功了。
     """
     if not JOBS_DIR.is_dir():
         return {"ok": False, "message": f"数据目录不存在：{JOBS_DIR}\n"
@@ -1180,10 +1259,24 @@ def git_sync():
                                         f"（数据目录若配置在仓库外，就只能各机器独立使用）"}
     repo = Path(p.stdout.strip())
 
+    fl = FileLock(LOCAL_DIR / ".sync.lock", blocking=False)
     try:
-        p = _git(["pull", "--rebase", "--autostash"], cwd=repo)
+        fl.__enter__()
+    except LockBusy:
+        return {"ok": False, "message": "已有同步或推送正在进行，请稍后再试。"}
+    try:
+        with jobs_lock(), _JOBS_LOCK, _LOCAL_LOCK:
+            return _pull_and_reindex(repo)
+    finally:
+        fl.__exit__()
+
+
+def _pull_and_reindex(repo):
+    """pull → 迁移 → 重建索引的公共主体。调用方必须已持有 .sync.lock 与各层锁。"""
+    try:
+        p = _git(["pull", "--rebase", "--autostash"], cwd=repo, timeout=60)
     except subprocess.TimeoutExpired:
-        return {"ok": False, "message": "git pull 超时（120 秒）。可能在等认证，"
+        return {"ok": False, "message": "git pull 超时（60 秒）。可能在等认证，"
                                         "请到终端手动执行一次 git pull 完成认证。"}
     except (OSError, subprocess.SubprocessError) as e:
         return {"ok": False, "message": f"git pull 执行失败：{e}"}
@@ -1425,7 +1518,7 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send_json({"error": err}, 400)
             # 先探一次个人层：它坏了就别写共享层，否则会留下一个谁也删不掉的孤儿岗位
             read_local_strict()
-            with _JOBS_LOCK:      # id 分配 + 落盘要一起做，否则并发新增会互相覆盖
+            with jobs_lock(), _JOBS_LOCK:      # id 分配 + 落盘要一起做，否则并发新增会互相覆盖
                 base = canonical_id(data)
                 # 有职位号时 base 是稳定的，撞上说明这个岗位已经录过了 —— 与其造一条
                 # 「-2」的重复记录，不如直接告诉用户去哪看
@@ -1483,7 +1576,7 @@ class Handler(BaseHTTPRequestHandler):
         if err:
             return self.send_json({"error": err}, 400)
 
-        with _JOBS_LOCK:
+        with jobs_lock(), _JOBS_LOCK:
             job = load_shared(m.group(1))    # 拿锁后重读，避免用过期快照回写
             if not job:
                 return self.send_json({"error": "not found"}, 404)
@@ -1533,6 +1626,7 @@ def main():
     if not JOBS_DIR.is_dir():
         sys.exit(f"数据目录不存在：{JOBS_DIR}\n"
                  f"请检查 {CONFIG_PATH} 里的 data_dir，或先跑一次：python install.py")
+    acquire_instance_guard()
 
     try:
         # 时间线的补种在 migrate() 内部做，不要在这里再调一次 migrate_local()：
