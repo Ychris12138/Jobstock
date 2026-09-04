@@ -18,6 +18,7 @@
 所以「控件读不出来」不等于「用户想清空」。
 """
 import argparse
+import difflib
 import functools
 import hashlib
 import json
@@ -28,6 +29,7 @@ import subprocess
 import sys
 import threading
 import traceback
+import unicodedata
 import urllib.parse
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -462,8 +464,14 @@ def days_between(a, b):
         return None
 
 
+def _deaccent(s):
+    """NFKD 分解后去掉变音符号：Schrödinger 与 Schrodinger 应该算同一家公司。"""
+    return "".join(ch for ch in unicodedata.normalize("NFKD", s)
+                   if not unicodedata.combining(ch))
+
+
 def slugify(text):
-    s = re.sub(r"[^\w一-鿿-]+", "-", text.strip().lower()).strip("-")
+    s = re.sub(r"[^\w一-鿿-]+", "-", _deaccent(text).strip().lower()).strip("-")
     return s or "job"
 
 
@@ -482,12 +490,36 @@ def canonical_id(job):
 
 
 def fuzzy_key(s):
-    """把文本压成用于比对的指纹：去掉空白、标点、大小写差异。
+    """把文本压成用于比对的指纹：去掉空白、标点、大小写、变音符差异。
 
     「AI分子动力学算法研究员 - AI for Science」和「AI分子动力学算法研究员-AI for science」
-    应该被认成同一个岗位。
+    应该被认成同一个岗位；Schrödinger 和 Schrodinger 也该是同一家公司。
     """
-    return re.sub(r"[^\w一-鿿]+", "", norm_text(s).lower())
+    return re.sub(r"[^\w一-鿿]+", "", _deaccent(norm_text(s).lower()))
+
+
+# 录入去重用的链接归一：只剔除已知的跟踪参数，其余 query 原样保留 ——
+# moka / 飞书链接里的 jobId 类参数是岗位身份的一部分，动了就撞不出重复
+TRACK_PARAMS = {"spm", "gclid", "fbclid", "from", "tt_from", "share_token", "share_source"}
+
+
+def norm_url(u):
+    """投递链接的比对形态：小写 scheme/host、去 fragment 与尾斜杠、剔除跟踪参数。"""
+    u = norm_text(u)
+    if not u:
+        return ""
+    try:
+        sp = urllib.parse.urlsplit(u)
+    except ValueError:
+        return u
+    host = (sp.hostname or "").lower()
+    if not host:
+        return u          # 不是标准链接就不比了
+    qs = [(k, v) for k, v in urllib.parse.parse_qsl(sp.query, keep_blank_values=True)
+          if k.lower() not in TRACK_PARAMS and not k.lower().startswith("utm_")]
+    netloc = host if not sp.port else f"{host}:{sp.port}"
+    return urllib.parse.urlunsplit((sp.scheme.lower(), netloc, sp.path.rstrip("/") or "/",
+                                    urllib.parse.urlencode(qs), ""))
 
 
 def load_json(path):
@@ -1915,6 +1947,35 @@ class Handler(BaseHTTPRequestHandler):
                         {"error": f"这个岗位已经录过了（职位号 {data['job_no']}），"
                                   f"在列表里搜「{norm_text(data.get('company'))}」就能找到。",
                          "existing_id": base}, 409)
+                # 录入端防重前移：职位号只覆盖填了的岗位（存量三分之二都没有），
+                # 链接归一 + 公司岗位名相似度把兜底从「reindex 的事后报告」前移到写入前。
+                # 两个人前后录同一个岗位、岗位名还差一个字，正是最常见也最隐蔽的重复。
+                nu = norm_url(data.get("url"))
+                fuzzy_cands = []
+                fc26 = fuzzy_key(data.get("company"))
+                fp26 = fuzzy_key(data.get("position"))
+                for f in sorted(JOBS_DIR.glob("*.json")):
+                    j = load_json(f)
+                    if not isinstance(j, dict):
+                        continue
+                    if nu and norm_url(j.get("url")) == nu:
+                        return self.send_json(
+                            {"error": f"这个投递链接已经录过了"
+                                      f"（{norm_text(j.get('company'))} {norm_text(j.get('position'))}），"
+                                      f"搜「{norm_text(data.get('company'))}」就能找到。",
+                             "existing_id": norm_text(j.get("id")) or f.stem}, 409)
+                    if (not norm_text(data.get("job_no")) and fc26 and fp26
+                            and fuzzy_key(j.get("company")) == fc26
+                            and difflib.SequenceMatcher(None, fp26, fuzzy_key(j.get("position"))
+                                                        ).ratio() >= 0.87):
+                        fuzzy_cands.append({"id": norm_text(j.get("id")) or f.stem,
+                                            "company": norm_text(j.get("company")),
+                                            "position": norm_text(j.get("position"))})
+                if fuzzy_cands and not data.get("confirm_duplicate"):
+                    return self.send_json(
+                        {"error": "疑似已存在同公司、几乎同名的岗位。确实是不同部门/批次的岗位，"
+                                  "就再提交一次并带上 confirm_duplicate=true。",
+                         "need_confirm": "confirm_duplicate", "candidates": fuzzy_cands[:5]}, 409)
                 jid, i = base, 2
                 while (JOBS_DIR / f"{jid}.json").exists():
                     jid, i = f"{base}-{i}", i + 1

@@ -812,7 +812,13 @@ async function saveJob() {
       const d = await api(`/api/jobs/${editingId}`, {method: 'PUT', body, quiet409: true});
       if (d.conflict) { alert(d.error); return; }   // 弹窗不关，用户的输入还在
     } else {
-      await api('/api/jobs', {body});
+      const d = await api('/api/jobs', {body, quiet409: true});
+      if (d.need_confirm === 'confirm_duplicate') {
+        const list = (d.candidates || []).map(c => `· ${c.company} ${c.position}`).join('\n');
+        if (!confirm('疑似已存在同公司、几乎同名的岗位：\n' + list
+                     + '\n\n确认是新岗位（不同部门/批次），继续创建？')) return;
+        await api('/api/jobs', {body: {...body, confirm_duplicate: true}});
+      } else if (d.error) { alert(d.error); return; }
     }
     dlg.close();
     loadJobs();

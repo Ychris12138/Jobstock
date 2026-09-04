@@ -1115,6 +1115,33 @@ w25 = server.apply_id_migrations()
 check(any("并存" in w for w in w25), "新旧键并存时不自动合并，只告警让人裁决")
 server.configure(data_dir=str(TMP), cv_dir=str(TMP / "cv"))
 
+# ---- 26. 录入防重前移与变音符归一 ------------------------------------------------
+print("\n【26】录入防重前移与变音符归一")
+u26 = add(company="防重公司", position="防重岗位",
+          url="https://app.moka.example.com/300544?jobId=abc&spm=sm")
+code, d = req("POST", "/api/jobs", {"company": "别的写法公司", "position": "随便",
+                                    "url": "https://APP.MOKA.EXAMPLE.com/300544?jobId=abc&spm=x&utm_source=chat"})
+check(code == 409 and d.get("existing_id") == u26,
+      "链接归一（大小写/跟踪参数）后重复录入被 409 拦下")
+code, d = req("POST", "/api/jobs", {"company": "防重公司", "position": "另一个岗",
+                                    "url": "https://app.moka.example.com/300544?jobId=DIFFERENT"})
+check(code == 200, "jobId 这类业务参数参与比对：不同岗位的链接不误判")
+code, d = req("POST", "/api/jobs", {"company": "防重公司", "position": "防重岗位2"})
+check(code == 409 and d.get("need_confirm") == "confirm_duplicate" and d.get("candidates"),
+      "同公司几乎同名且无职位号 → 409 疑似重复并附候选")
+code, d = req("POST", "/api/jobs", {"company": "防重公司", "position": "防重岗位2",
+                                    "confirm_duplicate": True})
+check(code == 200, "带 confirm_duplicate 放行（不同部门同名岗位是真实场景）")
+code, d = req("POST", "/api/jobs", {"company": "重复公司", "position": "重复岗位",
+                                    "job_no": "Z999", "confirm_duplicate": True})
+check(code == 409 and "已经录过" in d.get("error", ""),
+      "job_no 精确命中的 409 不被 confirm_duplicate 绕过（出路是去重合并）")
+check(server.slugify("Schrödinger-ML") == "schrodinger-ml", "slugify 去变音符（NFKD）")
+check(server.fuzzy_key("Schrödinger") == server.fuzzy_key("Schrodinger"), "fuzzy_key 折叠变音符")
+check(server.canonical_id({"company": "Schrödinger", "position": "X"})
+      == server.canonical_id({"company": "Schrodinger", "position": "X"}),
+      "变音符公司算出同一个 id，重复拦得住")
+
 SRV.shutdown()
 shutil.rmtree(TMP, ignore_errors=True)
 print(f"\n{'='*46}\n通过 {PASSED} 项，失败 {FAILED} 项\n{'='*46}")
