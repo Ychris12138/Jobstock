@@ -36,6 +36,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent
 CONFIG_PATH = ROOT / "config.json"
 WEB_DIR = ROOT / "web"
+SERVER_VERSION = "0.3.0"   # 随功能性改动一起更新；前端用它检测「网页新、后台旧」
 
 # 数据位置：默认都在仓库内；可用 config.json 或 CLI 参数 --data-dir / --cv-dir 覆盖。
 JOBS_DIR = ROOT / "jobs"
@@ -1233,6 +1234,23 @@ def _rebase_in_progress(repo):
     return False
 
 
+def _locate_repo():
+    """找到 JOBS_DIR 所属的 git 仓库顶层。返回 (repo, None) 或 (None, 错误信息)。"""
+    if not JOBS_DIR.is_dir():
+        return None, (f"数据目录不存在：{JOBS_DIR}\n"
+                      f"（外接硬盘没插？目录被改名？检查 config.json）")
+    try:
+        p = _git(["rev-parse", "--show-toplevel"], cwd=JOBS_DIR, timeout=20)
+    except FileNotFoundError:
+        return None, "找不到 git 命令，请先安装 git。"
+    except (OSError, subprocess.SubprocessError) as e:
+        return None, f"无法定位 git 仓库：{e}"
+    if p.returncode != 0:
+        return None, (f"{JOBS_DIR} 不在任何 git 仓库里，无法同步。\n"
+                      f"（数据目录若配置在仓库外，就只能各机器独立使用）")
+    return Path(p.stdout.strip()), None
+
+
 def git_sync():
     """git pull --rebase --autostash 拉取合作者维护的招聘数据，然后重建索引。
 
@@ -1245,19 +1263,9 @@ def git_sync():
     共享/个人两层进程内锁 —— pull 的 checkout 会改写 jobs/*.json，不锁的话
     和并发的 POST/PUT 互相覆盖，两边都以为自己的写入成功了。
     """
-    if not JOBS_DIR.is_dir():
-        return {"ok": False, "message": f"数据目录不存在：{JOBS_DIR}\n"
-                                        f"（外接硬盘没插？目录被改名？检查 config.json）"}
-    try:
-        p = _git(["rev-parse", "--show-toplevel"], cwd=JOBS_DIR, timeout=20)
-    except FileNotFoundError:
-        return {"ok": False, "message": "找不到 git 命令，请先安装 git。"}
-    except (OSError, subprocess.SubprocessError) as e:
-        return {"ok": False, "message": f"无法定位 git 仓库：{e}"}
-    if p.returncode != 0:
-        return {"ok": False, "message": f"{JOBS_DIR} 不在任何 git 仓库里，无法同步。\n"
-                                        f"（数据目录若配置在仓库外，就只能各机器独立使用）"}
-    repo = Path(p.stdout.strip())
+    repo, err = _locate_repo()
+    if not repo:
+        return {"ok": False, "message": err}
 
     fl = FileLock(LOCAL_DIR / ".sync.lock", blocking=False)
     try:
@@ -1312,6 +1320,113 @@ def _pull_and_reindex(repo):
     migrate()
     migrate_ids()
     return {"ok": True, "message": out, **reindex()}
+
+
+def git_status(fetch=False):
+    """本地 git 状态概览：领先/落后远端多少、jobs/ 下有哪些未提交改动。
+
+    ahead 是「本地 commit 了但没推送」的数量 —— 只拉不推的同步模型里，这个数
+    就是「你录的数据别人看不到」的直接证据，必须让它常驻页面上可见，否则本地
+    commit 会无限堆积而本人毫无察觉。
+
+    behind 需要 git fetch（网络调用、可能等认证），只在调用方明确要求时才算，
+    绝不放进页面加载路径。
+    """
+    repo, err = _locate_repo()
+    if not repo:
+        return {"in_repo": False, "message": err}
+
+    def out(args, timeout=30):
+        p = _git(args, cwd=repo, timeout=timeout)
+        return p.stdout.strip() if p.returncode == 0 else ""
+
+    branch = out(["rev-parse", "--abbrev-ref", "HEAD"]) or "HEAD"
+    upstream = out(["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"]) or None
+    ahead = int(out(["rev-list", "--count", "@{u}..HEAD"]) or 0) if upstream else None
+    behind = None
+    if fetch and upstream:
+        fp = _git(["fetch"], cwd=repo, timeout=60)
+        behind = int(out(["rev-list", "--count", "HEAD..@{u}"]) or 0) if fp.returncode == 0 else None
+    modified, untracked = [], []
+    p = _git(["status", "--porcelain", "--", "jobs"], cwd=repo, timeout=30)
+    for line in p.stdout.splitlines():
+        if len(line) < 4:
+            continue
+        st, name = line[:2], line[3:]
+        if Path(name).name.startswith("."):     # 锁文件等辅助文件不进预览
+            continue
+        if st.strip() == "??":
+            untracked.append(name)
+        else:
+            modified.append(f"{st} {name}")
+    lp = _git(["log", "--oneline", "@{u}..HEAD"] if upstream else ["log", "--oneline", "-10"],
+              cwd=repo, timeout=30)
+    unpushed = [x for x in lp.stdout.splitlines() if x.strip()] if lp.returncode == 0 else []
+    return {"in_repo": True, "branch": branch, "upstream": upstream, "ahead": ahead,
+            "behind": behind, "unpushed_commits": unpushed,
+            "dirty": {"modified": modified, "untracked": untracked},
+            "last_commit_at": out(["log", "-1", "--format=%ci", "--", "jobs"])}
+
+
+def git_push(message):
+    """提交 jobs/ 下的共享层改动并推送。调用方（页面）必须先展示预览、经人确认。
+
+    只 add jobs/：个人层、CV、config 本就被 gitignore 挡住，这里再收一道口子，
+    保证「推送」永远碰不到共享招聘数据以外的任何东西。推送要人确认的原则落在
+    两个「不」上：无确认不 commit，无预览不 push。
+    """
+    repo, err = _locate_repo()
+    if not repo:
+        return {"ok": False, "message": err}
+    fl = FileLock(LOCAL_DIR / ".sync.lock", blocking=False)
+    try:
+        fl.__enter__()
+    except LockBusy:
+        return {"ok": False, "message": "已有同步或推送正在进行，请稍后再试。"}
+    try:
+        st = git_status()
+        if not st["in_repo"]:
+            return {"ok": False, "message": st.get("message", "无法定位 git 仓库")}
+        dirty = st["dirty"]
+        ahead = st["ahead"] or 0
+        if not dirty["modified"] and not dirty["untracked"] and not ahead:
+            return {"ok": True, "pushed": False, "status": st,
+                    "message": "没有可推送的改动：jobs/ 下没有未提交内容，"
+                               "本地也没有领先远端的 commit。"}
+        with jobs_lock(), _JOBS_LOCK:
+            _git(["add", "--", "jobs"], cwd=repo, timeout=60)
+            if _git(["diff", "--cached", "--quiet"], cwd=repo, timeout=30).returncode != 0:
+                if not norm_text(message):
+                    message = (f"data: WebUI 推送（更新 {len(dirty['modified'])}、"
+                               f"新增 {len(dirty['untracked'])}）")
+                c = _git(["commit", "-m", norm_text(message)], cwd=repo, timeout=60)
+                if c.returncode != 0:
+                    return {"ok": False, "message": "git commit 失败：\n" + (c.stdout + c.stderr).strip()}
+        up = _git(["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"],
+                  cwd=repo, timeout=20)
+        if up.returncode == 0:
+            push_args = ["push"]
+        else:
+            branch = _git(["rev-parse", "--abbrev-ref", "HEAD"], cwd=repo, timeout=20).stdout.strip()
+            push_args = ["push", "-u", "origin", branch or "main"]
+        p = _git(push_args, cwd=repo, timeout=120)
+        if p.returncode != 0:
+            # 远端比本地新：先拉平（复用同步的 rebase --autostash 流程）再推一次
+            with jobs_lock(), _JOBS_LOCK, _LOCAL_LOCK:
+                pulled = _pull_and_reindex(repo)
+            if not pulled["ok"]:
+                files = _unmerged_paths(repo)
+                return {"ok": False, "conflict": bool(files), "files": files,
+                        "message": "推送被拒（远端有新提交），自动拉取时遇到冲突"
+                                   + ("，请在页面上处理冲突后重试：" if files else "：\n")
+                                   + "\n\n" + pulled["message"]}
+            p = _git(push_args, cwd=repo, timeout=120)
+            if p.returncode != 0:
+                return {"ok": False, "message": "拉平后推送仍失败：\n" + (p.stdout + p.stderr).strip()}
+        return {"ok": True, "pushed": True, "status": git_status(),
+                "message": (p.stdout + p.stderr).strip()}
+    finally:
+        fl.__exit__()
 
 
 # ---------------------------------------------------------------- HTTP
@@ -1452,7 +1567,11 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/jobs":
             d = list_jobs(query)
             return self.send_json({**d, "statuses": STATUSES, "categories": CATEGORIES,
-                                   "recruit_types": RECRUIT_TYPES})
+                                   "recruit_types": RECRUIT_TYPES,
+                                   "server_version": SERVER_VERSION})
+        if path == "/api/git_status":
+            return self.send_json(
+                git_status(fetch=query.get("fetch", ["0"])[0] in ("1", "true")))
         m = re.fullmatch(r"/api/jobs/([^/]+)", path)
         if m:
             job = load_shared(m.group(1))
@@ -1497,6 +1616,8 @@ class Handler(BaseHTTPRequestHandler):
             return self.send_json({"ok": True, **reindex()})
         if path == "/api/sync":
             return self.send_json(git_sync())
+        if path == "/api/push":
+            return self.send_json(git_push(self.read_body().get("message", "")))
         if path == "/api/dedupe":
             # 只合并强信号的重复组（同职位号 / 同链接）。名字相似属于疑似，
             # 同一家公司不同部门完全可能有同名岗位，那种要人来判断。

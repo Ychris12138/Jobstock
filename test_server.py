@@ -861,6 +861,61 @@ server.configure(data_dir=str(TMP / "guardlab"), cv_dir=str(TMP / "cv"))
 server.acquire_instance_guard()      # 成功路径：正常持有，进程剩余时间都算「这个实例」
 server.configure(data_dir=str(TMP), cv_dir=str(TMP / "cv"))
 
+# ---- 21. git_status 与一键推送 ------------------------------------------------
+print("\n【21】git_status 与一键推送")
+GL3 = TMP / "pushlab"
+GL3.mkdir()
+ORIGIN3 = GL3 / "origin.git"
+subprocess.run(["git", "init", "--bare", "-b", "main", str(ORIGIN3)], capture_output=True)
+PA, PB = GL3 / "alice", GL3 / "bob"
+git("clone", str(ORIGIN3), str(PA), cwd=GL3)
+write_job(PA, "推送岗", company="推送公司", position="推送岗位", salary="10K")
+git("add", "-A", cwd=PA)
+git("commit", "-m", "init", cwd=PA)
+git("push", "-u", "origin", "main", cwd=PA)
+git("clone", str(ORIGIN3), str(PB), cwd=GL3)
+server.configure(data_dir=str(PA), cv_dir=str(PA / "cv"))
+server.reindex()
+
+st0 = server.git_status()
+check(st0["in_repo"] and st0["ahead"] == 0 and st0["upstream"] == "origin/main",
+      "干净仓库：ahead=0 且认出 upstream")
+
+pid21 = add(company="推送公司", position="第二个岗")     # WebUI 录入，未 commit
+st1 = server.git_status()
+check(any(pid21 in x for x in st1["dirty"]["untracked"]), "新增岗位出现在待提交清单里")
+check(st1["ahead"] == 0, "还没 commit 时 ahead 仍是 0（dirty 和 ahead 是两回事）")
+r21 = server.git_push("data: 测试推送")
+check(r21["ok"] is True and r21["pushed"] is True, "一键提交并推送成功")
+st2 = server.git_status()
+check(st2["ahead"] == 0 and not st2["dirty"]["modified"] and not st2["dirty"]["untracked"],
+      "推送后工作区干净、ahead 归零")
+git("pull", cwd=PB)
+check((PB / "jobs" / f"{pid21}.json").exists(), "合作者拉到了推送的岗位")
+
+# push 被拒（远端更新）→ 自动拉平再推，双方改动都不丢
+write_job(PB, "推送岗", company="推送公司", position="推送岗位", salary="99K")
+git("add", "-A", cwd=PB)
+git("commit", "-m", "bob 先推了一步", cwd=PB)
+git("push", cwd=PB)
+write_job(PA, "推送岗2", company="推送公司", position="第三岗")
+r21b = server.git_push("data: 本地也有改动")
+check(r21b["ok"] is True and r21b["pushed"] is True, "push 被拒后自动拉平并重试成功")
+check(json.loads((PA / "jobs" / "推送岗.json").read_text(encoding="utf-8"))["salary"] == "99K",
+      "拉平把合作者的改动带了回来")
+git("pull", cwd=PB)
+check((PB / "jobs" / "推送岗2.json").exists(), "本地的新岗位也一并推了上去，合作者拉得到")
+
+server.configure(data_dir=str(TMP), cv_dir=str(TMP / "cv"))
+check(server.git_status()["in_repo"] is False, "非 git 仓库时 in_repo=False")
+server.configure(data_dir=str(PA), cv_dir=str(PA / "cv"))
+code, d = req("GET", "/api/git_status")
+check(code == 200 and d["in_repo"] is True and "ahead" in d, "GET /api/git_status 路由可用")
+_, jobs_resp = req("GET", "/api/jobs")
+check(jobs_resp.get("server_version") == server.SERVER_VERSION,
+      "列表响应带 server_version（前端检测网页新/后台旧）")
+server.configure(data_dir=str(TMP), cv_dir=str(TMP / "cv"))
+
 SRV.shutdown()
 shutil.rmtree(TMP, ignore_errors=True)
 print(f"\n{'='*46}\n通过 {PASSED} 项，失败 {FAILED} 项\n{'='*46}")

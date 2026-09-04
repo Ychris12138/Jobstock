@@ -171,16 +171,20 @@ python install.py --data-dir "D:\jobs-data" --cv-dir "~/Documents/my-cv"
    + 重建索引。带 `--autostash` 是必需的：在 WebUI 里编辑过岗位后工作区就是脏的，
    不 autostash 的话 git 会直接拒绝 rebase。失败时（例如 rebase 冲突）会自动
    `git rebase --abort` 把仓库恢复到同步前的状态，不会把你留在 detached HEAD 上。
-   **推送仍然手动做**（`git add jobs/ && git commit && git push`）—— 按钮只拉不推。
+4. **推给合作者的**：点「⇧ 推送」。它先列出 `jobs/` 下待提交的文件与未推送的
+   commit，你确认后才 commit + push（只圈 `jobs/`，个人进度与 CV 永远不推）；
+   远端有新提交时会先自动拉平再推。按钮常驻显示「未推送 N」—— 这个数字就是
+   「你录的数据合作者还看不到」的证据，别让它一直红着。
 
 ## 协作流程
 
 ```
-合作者新增岗位 → git push
+合作者新增岗位 → 点「⇧ 推送」（或终端 git push）
        ↓
 你点「⇩ 拉取合作者数据」→ 新岗位出现在列表里（状态一律是「待投递」，因为状态是你自己的）
        ↓
 你投了 → 点「快捷状态」改成「已投递」→ 只写 local/status.json，git status 干净
+你录了新岗位 → 点「⇧ 推送」→ 弹窗预览改动，确认后才 commit + push
 ```
 
 一岗一文件的设计让 git 冲突基本只发生在「两人同时改同一个岗位」时。
@@ -245,6 +249,8 @@ python install.py --data-dir "D:\jobs-data" --cv-dir "~/Documents/my-cv"
 | POST | `/api/reindex` | 从 JSON + 本地状态重建索引；响应含 `skipped`（读不出来/id 重复的文件）、`warnings`（日期格式、枚举外的取值）与 `duplicates`（重复岗位组），**不会静默吞掉岗位** |
 | POST | `/api/dedupe` | 合并强信号的重复岗位组（同职位号 / 同投递链接），返回合并了哪些 |
 | POST | `/api/sync` | `git pull --rebase --autostash` 拉取合作者数据后重建索引（只拉不推）。rebase 失败会自动 `--abort` 恢复；autostash 贴回冲突时（git 此时退出码是 0）也判为失败并说清楚改动在 stash 里 |
+| POST | `/api/push` | 提交 `jobs/` 下的共享层改动并推送。message 可自定义，留空自动生成；远端较新时先自动拉平再推一次，仍冲突则返回 `conflict` 与文件清单。**只圈 `jobs/`** |
+| GET | `/api/git_status` | 本地 git 状态：`ahead`（未推送 commit 数）、`upstream`、`dirty`（jobs/ 下待提交清单）、`unpushed_commits`、`last_commit_at`。`behind` 要 `?fetch=1` 才算（网络调用，不进页面加载路径） |
 | GET | `/api/cv` | CV 原文件列表 + 解读文件（含解析出的关键词）+ 解读提示词 |
 
 ## 自测

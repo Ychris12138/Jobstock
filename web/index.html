@@ -158,6 +158,8 @@
   .more-dot { display: inline-block; min-width: 17px; height: 17px; line-height: 17px;
               text-align: center; border-radius: 999px; background: var(--accent); color: #fff;
               font-size: 11px; font-weight: 700; margin-left: 5px; }
+  /* 未推送徽标：红色实心 = 有 commit 停在本机、合作者还看不到 */
+  #push-btn.push-hot { background: #e03131; border-color: #e03131; color: #fff; font-weight: 700; }
 </style>
 </head>
 <body>
@@ -192,6 +194,8 @@
       <span style="flex:1 1 auto"></span>
       <button class="btn ghost small" onclick="reindex()" title="手动改了 jobs/*.json 或 cv/ 里的解读文件后点这里重算">↻ 重建索引</button>
       <button class="btn ghost small" onclick="syncRepo()" title="git pull --rebase --autostash：只拉取，不推送你自己的改动">⇩ 拉取合作者数据</button>
+      <button class="btn ghost small" id="push-btn" hidden onclick="openPush()"
+              title="把 jobs/ 下的共享招聘数据 commit 并推送给合作者">⇧ 推送</button>
     </div>
     <div class="toolbar" id="more-bar" hidden>
       <select id="f-company" onchange="loadJobs()"><option value="">全部公司</option></select>
@@ -277,8 +281,23 @@
   <datalist id="dl-tags"></datalist>
 </dialog>
 
+<dialog id="push-dlg">
+  <h3 style="margin-top:0">⇧ 提交并推送</h3>
+  <pre class="prompt" id="push-info"></pre>
+  <div class="form-grid" style="margin-top:12px">
+    <label>说明</label>
+    <input id="push-msg" style="grid-column:2"
+           placeholder="commit 说明，留空自动生成（data: WebUI 推送（更新 N、新增 N））">
+  </div>
+  <div class="dlg-actions">
+    <button class="btn ghost" onclick="pushDlg.close()">取消</button>
+    <button class="btn" onclick="doPush()">确认推送</button>
+  </div>
+</dialog>
+
 <script>
 const dlg = document.getElementById('dlg');
+const pushDlg = document.getElementById('push-dlg');
 let STATUSES = [], CATEGORIES = [], RECRUIT_TYPES = [], editingId = null, editingBase = '';
 const selectedTags = new Set();   // 已勾选的标签，多个取 AND
 let loadSeq = 0, searchTimer = null;
@@ -535,6 +554,8 @@ async function loadJobs() {
   setDatalist('dl-source', [...new Set([...d.facets.source,
     '官网', '牛客', '内推', 'Boss直聘', '实习僧', '猎头'])]);
   document.getElementById('count').textContent = `共 ${d.jobs.length} 条`;
+  checkServerVersion(d.server_version);
+  refreshGitStatus();
 
   document.getElementById('rows').innerHTML = d.jobs.map(j => `
     <tr class="${j.closed ? 'closed' : ''}" onclick="openEdit('${encodeURIComponent(j.id)}')">
@@ -615,6 +636,64 @@ async function syncRepo() {
 }
 
 const SHARED_INPUTS = ['company','position','job_no','url','salary','source','deadline','notes','jd'];
+
+// ── 推送：同步只拉不推，这里是另一半。未推送的 commit 停在本机 = 你录的
+// 数据合作者看不到，这个数字必须常驻可见，不能等人想起来去敲 git。
+function checkServerVersion(v) {
+  if (!v) return;                       // 旧版 server 没有这个字段，跳过
+  const old = localStorage.getItem('js_ver');
+  if (old && old !== v)
+    notice('⚠️ 后台 server.py 刚升级（' + esc(old) + ' → ' + esc(v)
+         + '），请到终端 Ctrl+C 停掉再重新运行，否则新功能不可用。');
+  localStorage.setItem('js_ver', v);
+}
+
+async function refreshGitStatus() {
+  const btn = document.getElementById('push-btn');
+  let d;
+  try { d = await fetch('/api/git_status').then(r => r.json()); }
+  catch (e) { btn.hidden = true; return; }    // 旧版 server 没有这个接口
+  if (!d.in_repo) { btn.hidden = true; return; }
+  const ahead = d.ahead || 0;
+  const dirty = d.dirty.modified.length + d.dirty.untracked.length;
+  btn.hidden = false;
+  btn.classList.toggle('push-hot', ahead > 0);
+  btn.textContent = ahead ? `⇧ 未推送 ${ahead}` : (dirty ? '⇧ 待提交' : '⇧ 已同步');
+  btn.title = ahead ? `${ahead} 个 commit 停在本机，合作者还看不到` : '把 jobs/ 下的改动推送给合作者';
+}
+
+async function openPush() {
+  let d;
+  try { d = await fetch('/api/git_status?fetch=1').then(r => r.json()); }
+  catch (e) { alert('拿不到仓库状态：' + e.message); return; }
+  if (!d.in_repo) { alert(d.message || '数据目录不在 git 仓库里，无法推送。'); return; }
+  const lines = [];
+  if (d.unpushed_commits.length)
+    lines.push('已 commit 未推送：\n  ' + d.unpushed_commits.join('\n  '));
+  if (d.dirty.modified.length)
+    lines.push('待提交（修改）：\n  ' + d.dirty.modified.join('\n  '));
+  if (d.dirty.untracked.length)
+    lines.push('待提交（新文件）：\n  ' + d.dirty.untracked.join('\n  '));
+  if (d.behind)
+    lines.push(`⚠️ 远端比本地新 ${d.behind} 个 commit，推送时会先自动拉平（遇冲突会在页面上引导处理）。`);
+  if (!lines.length) { alert('没有可推送的改动。'); return; }
+  document.getElementById('push-info').textContent =
+    '只推送 jobs/ 下的共享招聘数据（个人进度与 CV 永远不推）。\n\n' + lines.join('\n\n');
+  document.getElementById('push-msg').value = '';
+  pushDlg.showModal();
+}
+
+async function doPush() {
+  const d = await api('/api/push', {body: {message: document.getElementById('push-msg').value}});
+  pushDlg.close();
+  if (!d.ok) {
+    notice('⚠️ 推送失败：\n' + esc(d.message));
+    if (d.conflict) alert('推送时遇到合并冲突，处理方式见页面顶部提示。');
+    return;
+  }
+  alert(d.pushed ? '✅ 已推送给合作者。' : '没有可推送的改动。');
+  loadJobs();
+}
 
 // 让 select 能装下枚举外的存量值：不补这个临时项的话，读回来是空串，
 // 一保存就把合作者写的分类/状态抹掉了
