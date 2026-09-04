@@ -11,6 +11,7 @@
 同理，PUT 相关的用例一律用**前端真实发送的全字段 body**，而不是只发一两个字段的
 简化形态——真实前端每次都发全部字段，用简化 body 测出来的「不产生 git diff」是假的。
 """
+import http.client
 import json
 import os
 import shutil
@@ -753,6 +754,37 @@ check("jobs" in inj and len(inj["jobs"]) > 0, "认不出的 sort 退回默认排
 check([j["id"] for j in query(sort="match")["jobs"]][0] ==
       max(query()["jobs"], key=lambda j: j["match_hits"])["id"],
       "按匹配度排序：命中最多的排第一")
+
+# ---- 19. 请求体严格校验 ------------------------------------------------------
+print("\n【19】请求体严格校验")
+
+
+def raw_http(method, path, headers=None, body=b""):
+    """发一个手工构造的原始请求（测坏 JSON、伪造头这类 req() 造不出来的形态）。"""
+    head, sep, qs = path.partition("?")
+    path = urllib.parse.quote(head, safe="/%") + sep + qs
+    c = http.client.HTTPConnection("127.0.0.1", PORT, timeout=10)
+    try:
+        c.request(method, path, body=body, headers=headers or {})
+        r = c.getresponse()
+        data = r.read()
+        return r.status, (json.loads(data) if data else {})
+    finally:
+        c.close()
+
+
+code, d = raw_http("POST", "/api/jobs", {"Content-Type": "application/json"},
+                   '{"company": "半截'.encode())
+check(code == 400 and "JSON" in d.get("error", ""), "坏 JSON 请求体被显式拒绝（400），不再吞成空 dict")
+code, d = raw_http("PUT", "/api/jobs/精简岗位", {"Content-Type": "application/json"}, b'[1,2,3]')
+check(code == 400, "顶层不是对象的请求体被拒绝（PUT 不再返回假成功）")
+mini_before19 = mini.read_bytes()
+server.MAX_BODY = 100     # 故意调小，免得在测试里真发 5MB
+code, d = raw_http("PUT", "/api/jobs/精简岗位", {"Content-Type": "application/json"},
+                   json.dumps(frontend_body(req("GET", "/api/jobs/精简岗位")[1])).encode())
+server.MAX_BODY = 5 * 1024 * 1024
+check(code == 400, "超过大小上限的请求体被拒绝")
+check(mini.read_bytes() == mini_before19, "被拒绝的请求一个字节都没写进共享 JSON")
 
 SRV.shutdown()
 shutil.rmtree(TMP, ignore_errors=True)

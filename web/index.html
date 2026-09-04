@@ -607,7 +607,7 @@ async function reindex() {
 
 async function syncRepo() {
   const d = await api('/api/sync', {body: {}});
-  if (!d.ok) { notice('⚠️ 同步失败：\n' + d.message); alert('同步失败，详情见页面顶部提示。'); return; }
+  if (!d.ok) { notice('⚠️ 同步失败：\n' + esc(d.message)); alert('同步失败，详情见页面顶部提示。'); return; }
   showReport(d, `已拉取合作者数据：${d.count} 条岗位`);
   alert(`已拉取合作者数据，现共 ${d.count} 条岗位。\n` +
         `注意：这只是「拉取」，你自己新增的岗位还没有推送给别人。\n\n${d.message}`);

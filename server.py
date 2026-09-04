@@ -52,6 +52,19 @@ class LocalStateError(Exception):
     """个人状态文件损坏。宁可报错也不能当成空表继续写 —— 那会整表覆盖掉全部投递进度。"""
 
 
+class BadRequest(Exception):
+    """请求体不合法（不是 JSON / 顶层不是对象 / 超长）。
+
+    必须显式转成 400，绝不能吞掉：吞成空 dict 的话，PUT 会返回 200
+    「保存成功」但什么都没写，POST 会报出误导性的「company 必填」。
+    """
+
+
+# 请求体大小上限。JD 全文再长也就几 KB，5MB 足够宽裕；设上限是防异常客户端
+# 用超大 body 把线程和内存耗住。
+MAX_BODY = 5 * 1024 * 1024
+
+
 class FileLock:
     """跨进程文件锁。
 
@@ -1220,6 +1233,8 @@ def safe_route(fn):
     def wrapper(self):
         try:
             return fn(self)
+        except BadRequest as e:
+            self.safe_json_error(str(e), 400)
         except LocalStateError as e:
             self.safe_error(str(e))
         except Exception as e:
@@ -1248,6 +1263,12 @@ class Handler(BaseHTTPRequestHandler):
         except Exception:
             pass
 
+    def safe_json_error(self, msg, code):
+        try:
+            self.send_json({"error": msg}, code)
+        except Exception:
+            pass
+
     def send_file(self, path, ctype):
         try:
             body = path.read_bytes()
@@ -1260,12 +1281,27 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def read_body(self):
-        n = int(self.headers.get("Content-Length", 0))
+        """读并解析 JSON 请求体；不合法抛 BadRequest（safe_route 转 400）。
+
+        旧版本把解析失败吞成空 dict —— 那会让 PUT 一路走到「没有任何共享字段
+        变化」并返回 ok:true，用户以为保存成功了，实际一个字节都没写。
+        """
         try:
-            d = json.loads(self.rfile.read(n) or b"{}")
-        except Exception:
-            return {}
-        return d if isinstance(d, dict) else {}
+            n = int(self.headers.get("Content-Length", 0))
+        except ValueError:
+            raise BadRequest("Content-Length 头不合法")
+        if n < 0:
+            raise BadRequest("Content-Length 头不合法")
+        if n > MAX_BODY:
+            raise BadRequest(f"请求体超过上限（{MAX_BODY // (1024 * 1024)}MB）")
+        raw = self.rfile.read(n) if n > 0 else b"{}"
+        try:
+            d = json.loads(raw or b"{}")
+        except Exception as e:
+            raise BadRequest(f"请求体不是合法 JSON：{e}") from e
+        if not isinstance(d, dict):
+            raise BadRequest("请求体顶层必须是 JSON 对象")
+        return d
 
     def bad_values(self, data):
         """校验受控枚举与日期格式。返回错误信息，合法则返回 None。
