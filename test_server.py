@@ -427,12 +427,26 @@ def write_job(repo, name, **fields):
         encoding="utf-8")
 
 
+def seed_gitignore(repo):
+    """沙箱仓库补上真实仓库的 .gitignore。
+
+    沙箱是从空 bare 仓库种出来的，不带 .gitignore；而 server 一跑就会生成
+    data/jobs.db、jobs/.jobs.lock、local/ 这些本机文件。没有 ignore 的话
+    add -A 会把它们提交进沙箱 origin，下一台「机器」pull 时就会撞上
+    「untracked working tree files would be overwritten」。
+    """
+    (repo / ".gitignore").write_text(
+        (Path(__file__).resolve().parent / ".gitignore").read_text(encoding="utf-8"),
+        encoding="utf-8")
+
+
 GL = TMP / "gitlab"
 GL.mkdir()
 ORIGIN = GL / "origin.git"
 subprocess.run(["git", "init", "--bare", "-b", "main", str(ORIGIN)], capture_output=True)
 ALICE, BOB = GL / "alice", GL / "bob"
 git("clone", str(ORIGIN), str(ALICE), cwd=GL)
+seed_gitignore(ALICE)
 write_job(ALICE, "共享岗", company="共享公司", position="共享岗位", salary="30K")
 git("add", "-A", cwd=ALICE); git("commit", "-m", "init", cwd=ALICE)
 git("push", "-u", "origin", "main", cwd=ALICE)
@@ -815,6 +829,7 @@ ORIGIN2 = GL2 / "origin.git"
 subprocess.run(["git", "init", "--bare", "-b", "main", str(ORIGIN2)], capture_output=True)
 LA = GL2 / "alice"
 git("clone", str(ORIGIN2), str(LA), cwd=GL2)
+seed_gitignore(LA)
 write_job(LA, "锁岗", company="锁公司", position="锁岗位", salary="10K")
 git("add", "-A", cwd=LA)
 git("commit", "-m", "init", cwd=LA)
@@ -884,6 +899,7 @@ ORIGIN3 = GL3 / "origin.git"
 subprocess.run(["git", "init", "--bare", "-b", "main", str(ORIGIN3)], capture_output=True)
 PA, PB = GL3 / "alice", GL3 / "bob"
 git("clone", str(ORIGIN3), str(PA), cwd=GL3)
+seed_gitignore(PA)
 write_job(PA, "推送岗", company="推送公司", position="推送岗位", salary="10K")
 git("add", "-A", cwd=PA)
 git("commit", "-m", "init", cwd=PA)
@@ -973,6 +989,7 @@ ORIGIN4 = GL4 / "origin.git"
 subprocess.run(["git", "init", "--bare", "-b", "main", str(ORIGIN4)], capture_output=True)
 SEED = GL4 / "seed"
 git("clone", str(ORIGIN4), str(SEED), cwd=GL4)
+seed_gitignore(SEED)
 write_job(SEED, "冲突岗", company="冲突演公司", position="冲突演岗位", notes="初始")
 git("add", "-A", cwd=SEED)
 git("commit", "-m", "init", cwd=SEED)
@@ -1040,6 +1057,62 @@ check(saved24s["salary"] == "88K", "stash 相位「我的」值（88K）保留")
 check("99K" in saved24s.get("notes", ""), "stash 相位对方的 99K 转存进备注")
 check(git("stash", "list", cwd=ALICE).stdout.strip() == "",
       "本次同步新建的 stash 已自动 drop，不留垃圾")
+server.configure(data_dir=str(TMP), cv_dir=str(TMP / "cv"))
+
+# ---- 25. id 迁移广播（跨机器搬家个人进度） --------------------------------------
+print("\n【25】id 迁移广播")
+GL5 = TMP / "miglab"
+GL5.mkdir()
+ORIGIN5 = GL5 / "origin.git"
+subprocess.run(["git", "init", "--bare", "-b", "main", str(ORIGIN5)], capture_output=True)
+MA, MB = GL5 / "alice", GL5 / "bob"
+git("clone", str(ORIGIN5), str(MA), cwd=GL5)
+seed_gitignore(MA)
+write_job(MA, "待广播岗", company="广播公司", position="广播岗位")
+git("add", "-A", cwd=MA)
+git("commit", "-m", "init", cwd=MA)
+git("push", "-u", "origin", "main", cwd=MA)
+git("clone", str(ORIGIN5), str(MB), cwd=GL5)
+
+# 乙（另一台机器）在旧 id 上投了 —— 旧版里，甲一补职位号，这块进度就静默归零
+server.configure(data_dir=str(MB), cv_dir=str(MB / "cv"))
+server.reindex()
+server.update_local("待广播岗", {"status": "已投递", "my_notes": "乙的记录"})
+
+# 甲补职位号 → 触发改名 + 写广播记录（随 git 同步给所有人）
+server.configure(data_dir=str(MA), cv_dir=str(MA / "cv"))
+server.reindex()
+write_job(MA, "待广播岗", company="广播公司", position="广播岗位", job_no="B001")
+renamed25 = server.migrate_ids()
+NEW_ID25 = server.canonical_id({"company": "广播公司", "job_no": "B001"})   # 职位号小写化
+check(("待广播岗", NEW_ID25) in renamed25, "补职位号触发 id 升级改名")
+check((MA / "jobs" / ".id-migrations").exists() and
+      {"old": "待广播岗", "new": NEW_ID25} in
+      [{k: m[k] for k in ("old", "new")} for m in server.read_id_migrations()],
+      "改名时写入迁移广播记录（JSONL，随 jobs/ 进 git）")
+git("add", "-A", cwd=MA)
+git("commit", "-m", "feat: 补职位号，id 升级", cwd=MA)
+git("push", cwd=MA)
+
+# 乙同步 → 挂在旧 id 上的进度自动搬到新 id
+server.configure(data_dir=str(MB), cv_dir=str(MB / "cv"))
+r25 = server.git_sync()
+tbl_b = json.loads((MB / "local" / "status.json").read_text(encoding="utf-8"))
+print("PROBE r25:", {k: v for k, v in r25.items() if k in ("ok", "migrations", "message")}, file=__import__("sys").stderr)
+print("PROBE tbl_b keys:", list(tbl_b.keys()), file=__import__("sys").stderr)
+print("PROBE migrations file:", (MB / "jobs" / ".id-migrations").exists(), file=__import__("sys").stderr)
+print("PROBE jobs:", [p.name for p in (MB / "jobs").iterdir()], file=__import__("sys").stderr)
+check("待广播岗" not in tbl_b and tbl_b.get(NEW_ID25, {}).get("status") == "已投递",
+      "乙 pull 后旧 id 上的投递进度自动搬到新 id（旧版静默归零且报成功）")
+check(tbl_b[NEW_ID25]["my_notes"] == "乙的记录", "个人备注一并搬过去")
+check(r25.get("migrations") == [], "搬完无告警")
+r25b = server.git_sync()
+check(r25b.get("migrations") == [], "再同步不重复搬（幂等）")
+
+# 新旧键并存时不擅自动手：机器无权裁决两边各有内容的记录，只告警
+server.update_local("待广播岗", {"status": "笔试"})
+w25 = server.apply_id_migrations()
+check(any("并存" in w for w in w25), "新旧键并存时不自动合并，只告警让人裁决")
 server.configure(data_dir=str(TMP), cv_dir=str(TMP / "cv"))
 
 SRV.shutdown()

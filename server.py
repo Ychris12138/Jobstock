@@ -785,11 +785,14 @@ migrate_status = migrate   # 旧名字，保持向后兼容
 
 
 def rename_job(old_id, new_id):
-    """给岗位换 id：共享文件改名 + 个人状态的键跟着搬。
+    """给岗位换 id：共享文件改名 + 个人状态的键跟着搬 + 广播迁移记录。
 
     两边必须一起改 —— 只改文件名的话，投递进度就跟岗位脱节了（状态还挂在旧 id 上，
     界面上看到的会变回「待投递」）。目标 id 已被占用时返回 False 不动手，
     那种情况说明真撞车了，交给去重流程处理。
+
+    广播：本机能搬自己的个人状态，搬不了别人的 —— 其他机器 pull 到改名后的文件时，
+    靠 jobs/.id-migrations 里的记录把他们的孤儿键搬过去（见 apply_id_migrations）。
     """
     old_p, new_p = job_path(old_id), job_path(new_id)
     if not old_p or not new_p or not old_p.exists() or new_p.exists():
@@ -805,7 +808,70 @@ def rename_job(old_id, new_id):
         if old_id in table:
             table[new_id] = {**table.get(new_id, {}), **table.pop(old_id)}
             write_json_atomic(local_path(), table)
+    try:
+        # JSONL 追加而不是整只 JSON 数组：两台机器并发追加时 git 按行合并干净
+        with open(JOBS_DIR / ".id-migrations", "a", encoding="utf-8") as f:
+            f.write(json.dumps({"old": old_id, "new": new_id, "at": now()},
+                               ensure_ascii=False) + "\n")
+    except OSError as e:
+        print(f"⚠️ 迁移记录写入失败（其他机器将无法自动跟随这次改名）：{e}", file=sys.stderr)
     return True
+
+
+MIGRATIONS_FILE = ".id-migrations"   # 位于 jobs/ 下；无 .json 后缀，扫描不会把它当岗位
+
+
+def read_id_migrations():
+    """读迁移广播表。坏行跳过（追加式日志，半截行不该炸掉整个启动）。"""
+    p = JOBS_DIR / MIGRATIONS_FILE
+    if not p.exists():
+        return []
+    out = []
+    for line in p.read_text(encoding="utf-8", errors="replace").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            d = json.loads(line)
+        except Exception:
+            continue
+        if isinstance(d, dict) and norm_text(d.get("old")) and norm_text(d.get("new")):
+            out.append(d)
+    return out
+
+
+def apply_id_migrations():
+    """按广播表把本机的孤儿个人状态键搬到新 id 名下，返回告警列表。
+
+    幂等：搬完旧键即消失，重复执行是空操作。三种情况：
+      old 键在、new 键不在 → 搬（本机还没跟上这次改名的正常情况）
+      old 键不在           → 早已搬过或本来就没有，跳过
+      两键并存             → 不动（两边各有内容时机器无权裁决），只告警让人处理
+    """
+    warnings = []
+    ms = read_id_migrations()
+    if not ms:
+        return warnings
+    with _LOCAL_LOCK, local_lock():
+        table = read_local_strict()
+        dirty = False
+        for m in ms:
+            old, new = norm_text(m["old"]), norm_text(m["new"])
+            if old not in table:
+                continue
+            has_content = (norm_text(table[old].get("status")) not in ("", "待投递")
+                           or norm_text(table[old].get("my_notes"))
+                           or clean_history(table[old]))
+            if new in table:
+                if has_content:
+                    warnings.append(f"个人状态里「{old}」和「{new}」并存（岗位已改名为后者），"
+                                    f"旧记录未自动合并，请到编辑框确认后手工处理")
+                continue
+            table[new] = {**table.get(new, {}), **table.pop(old)}
+            dirty = True
+        if dirty:
+            write_json_atomic(local_path(), table)
+    return warnings
 
 
 def migrate_ids():
@@ -1084,6 +1150,12 @@ def reindex():
                                 f"已保留原值（筛选下拉里可以选到它）")
             upsert_index(conn, merge_local(job, table), kws)
         conn.commit()
+        # 孤儿个人状态键：本地记录挂在已不存在的岗位 id 上 —— 多半是别的机器改了
+        # 岗位 id 而广播表没跟上（或记录被手工删了）。报出来让人决定去留，绝不静默清掉
+        for lid in table:
+            if lid not in seen:
+                warnings.append(f"个人状态里有一条挂在不存在的岗位「{lid}」上的记录"
+                                f"（岗位可能已被删除或改名），未做任何改动")
     finally:
         conn.close()
     return {"count": len(seen), "skipped": skipped, "warnings": warnings,
@@ -1373,10 +1445,11 @@ def _pull_and_reindex(repo):
                 "会自动清理 stash 并重建索引；你的原始改动安全地存在 git stash 里"
                 "（终端跑 git stash list 能看到）。\n\n" + out}
 
+    migrate_w24 = apply_id_migrations()   # 先按广播表搬孤儿键，再做本机结构迁移
     migrate()
     migrate_ids()
     return {"ok": True, "message": out, "changes": _sync_changes(repo, old_rev),
-            **reindex()}
+            "migrations": migrate_w24, **reindex()}
 
 
 def _sync_changes(repo, old_rev):
@@ -1800,9 +1873,10 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         path = urllib.parse.unquote(urllib.parse.urlparse(self.path).path)
         if path == "/api/reindex":
+            mig_w = apply_id_migrations()
             migrate()
             migrate_ids()
-            return self.send_json({"ok": True, **reindex()})
+            return self.send_json({"ok": True, "migrations": mig_w, **reindex()})
         if path == "/api/sync":
             return self.send_json(git_sync())
         if path == "/api/push":
@@ -1941,6 +2015,8 @@ def main():
         sys.exit(f"数据目录不存在：{JOBS_DIR}\n"
                  f"请检查 {CONFIG_PATH} 里的 data_dir，或先跑一次：python install.py")
     acquire_instance_guard()
+    for w in apply_id_migrations():
+        print(f"⚠️  {w}")
 
     try:
         # 时间线的补种在 migrate() 内部做，不要在这里再调一次 migrate_local()：
