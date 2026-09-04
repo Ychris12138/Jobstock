@@ -876,8 +876,44 @@ def _pick_survivor(jobs):
                                        j["id"]))[0]
 
 
+def merge_two_jobs(a, b):
+    """字段级合并两条岗位，返回 (merged, conflicts)。
+
+    原则与 merge_group 声明的一致：空字段用对方补齐；locations / tags 取并集；
+    closed 取或；notes 与 jd 双方都有就拼接 —— 宁可留着让人删，也不要悄悄丢掉
+    合作者写的情报。其余文本字段（url/salary/deadline/job_no/source…）双方都有
+    且不同时，保留 a 的值、b 的值转存进 notes 并记入 conflicts；未知字段同样
+    空缺补齐（此前它们会随被删文件一起蒸发）。冲突必须可见 —— 静默丢掉对方
+    的 JD 曾是合并逻辑的头号罪过。
+    """
+    merged = dict(a)
+    conflicts = []
+    keys = list(SHARED_FIELDS) + [k for k in b.keys() if k not in SHARED_FIELDS
+                                  and k not in ("id", "created_at", "updated_at")]
+    for k in keys:
+        bv = b.get(k)
+        if k in MULTI_COLUMNS:
+            merged[k] = norm_list(list(merged.get(k) or []) + list(bv or []))
+        elif k in BOOL_FIELDS:
+            # 取或：只要有一个人标了下架，合并后就是下架
+            merged[k] = norm_bool(merged.get(k)) or norm_bool(bv)
+        elif is_empty(merged.get(k)) and not is_empty(bv):
+            merged[k] = bv
+        elif k in ("notes", "jd"):
+            if not is_empty(bv) and norm_text(bv) not in norm_text(merged.get(k)):
+                merged[k] = f"{merged.get(k) or ''}\n───\n{bv}".strip()
+        elif not is_empty(bv) and norm_text(bv) != norm_text(merged.get(k)):
+            conflicts.append({"id": b.get("id"), "field": k,
+                              "value": bv if isinstance(bv, str)
+                              else json.dumps(bv, ensure_ascii=False)})
+            if isinstance(bv, str):
+                merged["notes"] = (f"{merged.get('notes') or ''}"
+                                   f"\n{k}（另一条记录「{b.get('id')}」）：{bv}").strip()
+    return merged, conflicts
+
+
 def merge_group(ids):
-    """把一组重复岗位合并成一条，返回 (保留的 id, 被删掉的 id 列表)。
+    """把一组重复岗位合并成一条，返回 (保留的 id, 被删掉的 id 列表, 冲突清单)。
 
     共享层：空字段用其他条补齐；locations / tags 取并集；notes 内容不同就拼起来，
     宁可留着让人删，也不要悄悄丢掉别人写的情报。
@@ -889,23 +925,14 @@ def merge_group(ids):
     with jobs_lock(), _JOBS_LOCK, _LOCAL_LOCK, local_lock():
         jobs = [j for j in (load_shared(i) for i in ids) if j]
         if len(jobs) < 2:
-            return None, []
+            return None, [], [], []
         keep = _pick_survivor(jobs)
         others = [j for j in jobs if j["id"] != keep["id"]]
 
-        merged = dict(keep)
+        merged, conflicts = dict(keep), []
         for j in others:
-            for k in SHARED_FIELDS:
-                if k in MULTI_COLUMNS:
-                    merged[k] = norm_list(list(merged.get(k) or []) + list(j.get(k) or []))
-                elif k in BOOL_FIELDS:
-                    # 取或：只要有一个人标了下架，合并后就是下架。漏标的代价是白点一次
-                    # 链接，误清标记的代价是继续把它当活岗位准备材料
-                    merged[k] = norm_bool(merged.get(k)) or norm_bool(j.get(k))
-                elif not norm_text(merged.get(k)) and norm_text(j.get(k)):
-                    merged[k] = j[k]
-                elif k == "notes" and norm_text(j.get(k)) and norm_text(j[k]) not in norm_text(merged.get(k)):
-                    merged[k] = f"{merged[k]}\n{j[k]}".strip()
+            merged, cf = merge_two_jobs(merged, j)
+            conflicts.extend(cf)
         merged["updated_at"] = now()
 
         table = read_local_strict()
@@ -935,7 +962,7 @@ def merge_group(ids):
                 p.unlink(missing_ok=True)
         write_json_atomic(local_path(), table)
         save_job(merged)
-    return keep["id"], [j["id"] for j in others]
+    return keep["id"], [j["id"] for j in others], conflicts
 
 
 def split_tag_fields(data):
@@ -1675,9 +1702,10 @@ class Handler(BaseHTTPRequestHandler):
             for g in find_duplicates():
                 if not g["auto"]:
                     continue
-                keep, dropped = merge_group(g["ids"])
+                keep, dropped, conflicts = merge_group(g["ids"])
                 if keep:
-                    merged.append({"keep": keep, "dropped": dropped, "reason": g["reason"]})
+                    merged.append({"keep": keep, "dropped": dropped, "reason": g["reason"],
+                                   "conflicts": conflicts})
             return self.send_json({"ok": True, "merged": merged, **reindex()})
         if path == "/api/jobs":
             data = self.read_body()

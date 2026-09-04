@@ -931,6 +931,40 @@ check(jobs_resp.get("server_version") == server.SERVER_VERSION,
       "列表响应带 server_version（前端检测网页新/后台旧）")
 server.configure(data_dir=str(TMP), cv_dir=str(TMP / "cv"))
 
+# ---- 23. 合并不丢字段 ----------------------------------------------------------
+print("\n【23】合并不丢字段")
+# 甲乙各自录了同职位号的岗位：薪资/链接/截止都不同，JD 也各贴了一份，
+# 甲还多写了一个本版本不认识的字段。合并必须一样都不丢。
+write_raw("冲突A.json", {"id": "冲突A", "company": "冲突公司", "position": "冲突岗位",
+                        "job_no": "C555", "salary": "30K",
+                        "url": "https://jobs.example.com/555?utm_source=chat",
+                        "deadline": "2026-10-01", "jd": "甲贴的 JD：负责分子动力学",
+                        "notes": "甲的备注", "contact": "甲的联系人微信",
+                        "created_at": "2026-01-01 10:00", "updated_at": "2026-01-01 10:00"})
+write_raw("冲突B.json", {"id": "冲突B", "company": "冲突公司", "position": "冲突岗位",
+                        "job_no": "C555", "salary": "45K",
+                        "url": "https://jobs.example.com/555",
+                        "deadline": "2026-10-15", "jd": "乙贴的 JD：负责量子化学",
+                        "notes": "乙的备注", "extra_num": 7,
+                        "created_at": "2026-01-02 10:00", "updated_at": "2026-01-02 10:00"})
+req("POST", "/api/reindex")
+code, dd = req("POST", "/api/dedupe")
+m22 = [m for m in dd["merged"] if "冲突B" in m["dropped"]]
+check(bool(m22), "同职位号的重复组被合并")
+kept_id = m22[0]["keep"]
+_, kept = req("GET", f"/api/jobs/{U(kept_id)}")
+# 注意：带职位号的 冲突A 在 dedupe 前的 /api/reindex 里已被 migrate_ids
+# 自动升级成规范 id（这本身就是既有功能），幸存者应以新 id 断言
+check(kept_id == "冲突公司-c555", "打平时取先录进来的做幸存者（id 已按职位号升级）")
+check(kept.get("salary") == "30K", f"冲突字段保留幸存者值（实际 {kept.get('salary')!r}）")
+check("45K" in kept["notes"] and "2026-10-15" in kept["notes"],
+      "败者的薪资与截止日期转存进公共备注，而不是静默消失")
+check("乙贴的 JD" in kept["jd"] and "甲贴的 JD" in kept["jd"], "两份 JD 拼接保留")
+check(kept.get("contact") == "甲的联系人微信", "未知字段空缺补齐（此前会随被删文件一起蒸发）")
+check(kept.get("extra_num") == 7, "非字符串的自定义字段同样保留")
+fields22 = sorted(c["field"] for c in (m22[0].get("conflicts") or []))
+check(fields22 == ["deadline", "salary", "url"], f"冲突清单如实报告：{fields22}")
+
 SRV.shutdown()
 shutil.rmtree(TMP, ignore_errors=True)
 print(f"\n{'='*46}\n通过 {PASSED} 项，失败 {FAILED} 项\n{'='*46}")

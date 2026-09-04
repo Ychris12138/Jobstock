@@ -613,9 +613,12 @@ function showReport(d, prefix) {
 async function dedupe() {
   const d = await api('/api/dedupe', {body: {}});
   if (!d.merged.length) { alert('没有可自动合并的重复组。'); return; }
+  const cfl = d.merged.flatMap(m => m.conflicts || []);
   alert('已合并 ' + d.merged.length + ' 组：\n\n'
         + d.merged.map(m => `${m.dropped.join('、')}\n  → 并入 ${m.keep}`).join('\n\n')
-        + '\n\n投递状态取了进度更靠后的那条，个人备注做了拼接。');
+        + '\n\n投递状态取了进度更靠后的那条，个人备注做了拼接。'
+        + (cfl.length ? `\n\n⚠️ 有 ${cfl.length} 个字段两边写法不同：保留了信息更全的那份，`
+            + '另一份转存进了公共备注（搜「（另一条记录」能找到），确认无误后可删。' : ''));
   showReport(d, `合并完成，现共 ${d.count} 条岗位`);
   loadJobs();
 }
