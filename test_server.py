@@ -965,6 +965,83 @@ check(kept.get("extra_num") == 7, "非字符串的自定义字段同样保留")
 fields22 = sorted(c["field"] for c in (m22[0].get("conflicts") or []))
 check(fields22 == ["deadline", "salary", "url"], f"冲突清单如实报告：{fields22}")
 
+# ---- 24. 冲突自助引导 ----------------------------------------------------------
+print("\n【24】冲突自助引导")
+GL4 = TMP / "cflab"
+GL4.mkdir()
+ORIGIN4 = GL4 / "origin.git"
+subprocess.run(["git", "init", "--bare", "-b", "main", str(ORIGIN4)], capture_output=True)
+SEED = GL4 / "seed"
+git("clone", str(ORIGIN4), str(SEED), cwd=GL4)
+write_job(SEED, "冲突岗", company="冲突演公司", position="冲突演岗位", notes="初始")
+git("add", "-A", cwd=SEED)
+git("commit", "-m", "init", cwd=SEED)
+git("push", "-u", "origin", "main", cwd=SEED)
+
+
+def fresh_conflict(tag):
+    """造一个 rebase 冲突现场：乙先推了改动，甲本地 commit 改了同一行。
+
+    备注内容带上 tag：上一组把 origin 推进到「乙写的」之后，同内容的 commit
+    会变成 no-op，冲突就造不出来了。
+    """
+    A, B = GL4 / f"alice{tag}", GL4 / f"bob{tag}"
+    git("clone", str(ORIGIN4), str(A), cwd=GL4)
+    git("clone", str(ORIGIN4), str(B), cwd=GL4)
+    write_job(B, "冲突岗", company="冲突演公司", position="冲突演岗位", notes=f"乙写的{tag}")
+    git("add", "-A", cwd=B)
+    git("commit", "-m", f"乙改备注{tag}", cwd=B)
+    git("push", cwd=B)
+    write_job(A, "冲突岗", company="冲突演公司", position="冲突演岗位", notes=f"甲写的{tag}")
+    git("add", "-A", cwd=A)
+    git("commit", "-m", f"甲改备注{tag}", cwd=A)
+    return A
+
+
+A24 = fresh_conflict("1")
+server.configure(data_dir=str(A24), cv_dir=str(A24 / "cv"))
+r24 = server.git_sync()
+check(r24["ok"] is False and r24.get("conflict") is True and r24.get("phase") == "rebase",
+      "rebase 冲突保留现场交给页面处理（不再自动 abort 导致同步按钮永久瘫痪）")
+check(r24["files"] == ["jobs/冲突岗.json"], "冲突文件清单正确")
+code, j24 = req("GET", "/api/jobs/冲突岗")
+check(code == 409 and j24.get("conflict_file") == "jobs/冲突岗.json",
+      "冲突文件的单条 GET 返回 409 引导，而不是裸 404 让人以为岗位丢了")
+r24m = server.conflict_resolve("jobs/冲突岗.json", "mine")
+check(r24m["ok"] is True and r24m["finished"] is True, "「保留我的」处理完自动 rebase --continue")
+check(json.loads((A24 / "jobs" / "冲突岗.json").read_text(encoding="utf-8"))["notes"] == "甲写的1",
+      "「保留我的」落盘的是本机改动")
+check(server.git_status()["ahead"] == 1, "rebase --continue 后本机提交还在，可正常推送")
+
+A24b = fresh_conflict("2")
+server.configure(data_dir=str(A24b), cv_dir=str(A24b / "cv"))
+server.git_sync()
+r24t = server.conflict_resolve("jobs/冲突岗.json", "theirs")
+check(r24t["finished"] is True and
+      json.loads((A24b / "jobs" / "冲突岗.json").read_text(encoding="utf-8"))["notes"] == "乙写的2",
+      "「保留对方的」落盘合作者的版本")
+r24x = server.conflict_resolve("jobs/冲突岗.json", "mine")
+check(r24x["ok"] is False, "处理完再调用会被告知不在冲突清单（幂等防线）")
+
+A24c = fresh_conflict("3")
+server.configure(data_dir=str(A24c), cv_dir=str(A24c / "cv"))
+server.git_sync()
+r24b = server.conflict_resolve("jobs/冲突岗.json", "both")
+saved24 = json.loads((A24c / "jobs" / "冲突岗.json").read_text(encoding="utf-8"))
+check(r24b["finished"] is True and "甲写的3" in saved24["notes"] and "乙写的3" in saved24["notes"],
+      "「两边拼接」做字段级合并，双方信息都保留")
+
+# stash 相位：沿用第 13 节留下的 autostash 冲突现场（ALICE 沙箱）
+server.configure(data_dir=str(ALICE), cv_dir=str(ALICE / "cv"))
+r24s = server.conflict_resolve("jobs/共享岗.json", "both")
+check(r24s["ok"] is True and r24s["finished"] is True, "stash 相位：两边拼接处理完成并清理现场")
+saved24s = json.loads((ALICE / "jobs" / "共享岗.json").read_text(encoding="utf-8"))
+check(saved24s["salary"] == "88K", "stash 相位「我的」值（88K）保留")
+check("99K" in saved24s.get("notes", ""), "stash 相位对方的 99K 转存进备注")
+check(git("stash", "list", cwd=ALICE).stdout.strip() == "",
+      "本次同步新建的 stash 已自动 drop，不留垃圾")
+server.configure(data_dir=str(TMP), cv_dir=str(TMP / "cv"))
+
 SRV.shutdown()
 shutil.rmtree(TMP, ignore_errors=True)
 print(f"\n{'='*46}\n通过 {PASSED} 项，失败 {FAILED} 项\n{'='*46}")

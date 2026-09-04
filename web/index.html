@@ -631,7 +631,10 @@ async function reindex() {
 
 async function syncRepo() {
   const d = await api('/api/sync', {body: {}});
-  if (!d.ok) { notice('⚠️ 同步失败：\n' + esc(d.message)); alert('同步失败，详情见页面顶部提示。'); return; }
+  if (!d.ok) {
+    if (d.conflict) { renderConflict(d); alert('同步遇到冲突，按页面顶部提示处理，不用去终端。'); return; }
+    notice('⚠️ 同步失败：\n' + esc(d.message)); alert('同步失败，详情见页面顶部提示。'); return;
+  }
   showReport(d, `已拉取合作者数据：${d.count} 条岗位`);
   // 变更摘要：只弹一句「拉取成功」的话，没人知道合作者到底改了什么——
   // 尤其「别人下架了你还在推进的岗位」，必须红字示警而不是让它从列表里静默消失。
@@ -658,6 +661,40 @@ async function syncRepo() {
         (ch && (ch.new.length + ch.updated.length + ch.closed.length)
           ? `\n变更摘要见页面顶部提示。` : ''));
   loadJobs();
+}
+
+// ── 冲突自助：以前冲突只有一句「请到终端处理」，不会 git 的成员只能弃疗，
+// 且冲突 commit 不清掉的话同步按钮从此永久瘫痪。现在页面上三选一，
+// 全部处理完自动继续。注意「我的/对方的」由后端按 stage 号取内容，
+// 避开 --ours/--theirs 在 rebase 场景里的语义反转。
+let CONFLICT_PHASE = 'stash';
+
+function renderConflict(d) {
+  if (d.phase) CONFLICT_PHASE = d.phase;
+  const files = d.files || [];
+  const btns = files.map(f =>
+    `<div style="margin:8px 0 2px"><b>${esc(f)}</b><br>`
+    + `<button class="btn small" onclick="resolveConflict('${encodeURIComponent(f)}','mine')">保留我的</button> `
+    + `<button class="btn small" onclick="resolveConflict('${encodeURIComponent(f)}','theirs')">保留对方的</button> `
+    + `<button class="btn small" onclick="resolveConflict('${encodeURIComponent(f)}','both')">两边拼接</button></div>`)
+    .join('');
+  notice(`⚔️ 同步遇到冲突 —— 你的改动和合作者的改动碰了同一个岗位的同一处。\n`
+    + `每个文件选一个处理方式（「我的」= 本机的改动，「对方的」= 合作者推上来的）：\n${btns}`
+    + (CONFLICT_PHASE === 'stash'
+        ? '\n\n提示：你的原始改动安全地存在 git stash 里，全部处理完会自动清理。' : ''));
+}
+
+async function resolveConflict(fileEnc, action) {
+  const d = await api('/api/conflict/resolve',
+                      {body: {file: decodeURIComponent(fileEnc), action}});
+  if (!d.ok) { notice('⚠️ 冲突处理失败：\n' + esc(d.message)); return; }
+  if (d.finished) {
+    notice(d.note ? `✅ 冲突全部处理完${esc(d.note)}，索引已重建（${d.count} 条岗位）。`
+                  : `✅ 冲突全部处理完，索引已重建（${d.count} 条岗位）。`);
+    loadJobs();
+  } else {
+    renderConflict({files: d.remaining});
+  }
 }
 
 const SHARED_INPUTS = ['company','position','job_no','url','salary','source','deadline','notes','jd'];

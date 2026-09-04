@@ -1218,10 +1218,11 @@ def list_jobs(query):
 
 # ---------------------------------------------------------------- git 同步
 
-def _git(args, cwd, timeout=120):
+def _git(args, cwd, timeout=120, env_extra=None):
     """跑一条 git 命令。禁掉交互式认证，否则会挂在提示符上直到超时。"""
     env = {**os.environ, "GIT_TERMINAL_PROMPT": "0",
-           "GIT_SSH_COMMAND": os.environ.get("GIT_SSH_COMMAND", "ssh -oBatchMode=yes")}
+           "GIT_SSH_COMMAND": os.environ.get("GIT_SSH_COMMAND", "ssh -oBatchMode=yes"),
+           **(env_extra or {})}
     return subprocess.run(["git", "-c", "core.quotepath=false", *args], cwd=cwd,
                           capture_output=True, text=True, timeout=timeout, env=env)
 
@@ -1306,12 +1307,24 @@ def git_sync():
         fl.__exit__()
 
 
+# 上次同步是否为各仓库新建了 autostash（repo 路径 → True）。决定冲突处理完后
+# 要不要 stash drop —— 只清理本次同步自己创建的条目，别人的 stash 不能碰。
+_LAST_SYNC_STASH = {}
+
+
+def _stash_rev(repo):
+    """当前 stash 栈顶的 rev；空栈返回空串。"""
+    p = _git(["rev-parse", "-q", "--verify", "refs/stash"], cwd=repo, timeout=20)
+    return p.stdout.strip() if p.returncode == 0 else ""
+
+
 def _pull_and_reindex(repo):
     """pull → 迁移 → 重建索引的公共主体。调用方必须已持有 .sync.lock 与各层锁。"""
     old_rev = ""
     p0 = _git(["rev-parse", "HEAD"], cwd=repo, timeout=20)
     if p0.returncode == 0:
         old_rev = p0.stdout.strip()
+    stash_before = _stash_rev(repo)
     try:
         p = _git(["pull", "--rebase", "--autostash"], cwd=repo, timeout=60)
     except subprocess.TimeoutExpired:
@@ -1322,31 +1335,43 @@ def _pull_and_reindex(repo):
 
     out = (p.stdout + p.stderr).strip()
     if p.returncode != 0:
-        # 失败时可能停在 rebase 中间态（detached HEAD + 冲突标记），必须恢复干净状态，
-        # 否则用户接着点「重建索引」会看到岗位凭空消失
-        tail = ""
         if _rebase_in_progress(repo):
-            try:
-                ab = _git(["rebase", "--abort"], cwd=repo, timeout=60)
-                tail = ("\n\n仓库有冲突，已自动回滚到同步前的状态（git rebase --abort），"
-                        "你的改动已还原。请到终端手动处理冲突。"
-                        if ab.returncode == 0 else
-                        "\n\n⚠️ 自动回滚失败，仓库仍停在 rebase 中间态，"
-                        "请到终端执行：git rebase --abort")
-            except (OSError, subprocess.SubprocessError):
-                tail = "\n\n⚠️ 仓库可能停在 rebase 中间态，请到终端执行 git rebase --abort。"
-        return {"ok": False, "message": (out or f"git pull 失败（退出码 {p.returncode}）") + tail}
+            # 停在 rebase 中间态。不再自作主张 --abort —— 冲突的 commit 不清掉的话，
+            # 下次同步还会撞同一个冲突再回滚一次，同步按钮从此永久瘫痪。保留现场，
+            # 交给 /api/conflict/resolve 在页面上三选一，处理完自动继续。
+            files = _unmerged_paths(repo)
+            r = reindex()      # 带冲突标记的文件此刻读不出来，先把它们从索引里摘出来
+            tail = ""
+            if r.get("skipped"):
+                tail = ("\n\n以下文件暂读不出来（含冲突标记），已从索引中摘出，"
+                        "处理完自动回来：\n  " + "\n  ".join(r["skipped"]))
+            return {"ok": False, "conflict": True, "phase": "rebase", "files": files,
+                    "message": "拉取遇到冲突：合作者的改动和你本地未推送的提交改了同一个岗位。\n\n"
+                               "冲突文件：\n  " + "\n  ".join(files) + tail
+                               + "\n\n在页面上为每个文件选「保留我的 / 保留对方的 / 两边拼接」，"
+                                 "全部处理完会自动继续；也可以到终端手动处理（git status 看现场）。\n\n"
+                               + out}
+        # 其余失败（网络 / 认证等）照旧只报错
+        return {"ok": False, "message": (out or f"git pull 失败（退出码 {p.returncode}）")}
 
     # 退出码 0 不等于干净：fast-forward 成功、但 autostash 把本地改动贴回来时冲突，
     # git 也返回 0。此时共享 JSON 里已经写进了冲突标记，改动被留在 stash 里。
     conflicted = _unmerged_paths(repo)
     if conflicted:
-        return {"ok": False, "message":
+        now_stash = _stash_rev(repo)
+        _LAST_SYNC_STASH[str(repo)] = bool(now_stash) and now_stash != stash_before
+        r = reindex()      # 先把带冲突标记的文件从索引里摘出来，别让列表停在旧数据上
+        tail = ""
+        if r.get("skipped"):
+            tail = ("\n\n以下文件暂读不出来（含冲突标记），已从索引中摘出，"
+                    "处理完自动回来：\n  " + "\n  ".join(r["skipped"]))
+        return {"ok": False, "conflict": True, "phase": "stash", "files": conflicted,
+                "message":
                 "已拉到合作者的改动，但你本地未提交的改动在贴回来时和它冲突了。\n\n"
-                "冲突文件：\n  " + "\n  ".join(conflicted) + "\n\n"
-                "你的改动安全地存在 git stash 里（终端跑 git stash list 能看到）。\n"
-                "请到终端处理这些文件里的冲突标记，然后 git add，再 git stash drop。\n"
-                "在处理完之前，这些岗位在列表里是看不到的。\n\n" + out}
+                "冲突文件：\n  " + "\n  ".join(conflicted) + tail + "\n\n"
+                "在页面上为每个文件选「保留我的 / 保留对方的 / 两边拼接」，全部处理完"
+                "会自动清理 stash 并重建索引；你的原始改动安全地存在 git stash 里"
+                "（终端跑 git stash list 能看到）。\n\n" + out}
 
     migrate()
     migrate_ids()
@@ -1506,6 +1531,77 @@ def git_push(message):
         fl.__exit__()
 
 
+def conflict_resolve(file, action):
+    """页面上的冲突三选一：保留我的 / 保留对方的 / 两边拼接。
+
+    取内容必须按 stage 号而不是 --ours/--theirs 旗标：pull --rebase 冲突时
+    stage 2（ours）是远端内容、stage 3（theirs）才是本地提交，与 merge 的直觉
+    正好相反；autostash 贴回冲突时语义又不同。而 stage 号在两种场景下恒定：
+    3 = 本方改动、2 = 对方内容 —— 一套代码，按钮文案不会有歧义。
+
+    rebase 相位：全部文件处理完自动 `rebase --continue`（之后 autostash 会自动
+    贴回，若贴回又冲突，会再次进入 stash 相位的流程）；
+    stash 相位：处理完自动 drop 掉本次同步新建的 stash 条目。
+    """
+    file = norm_text(file).replace("\\", "/")
+    if action not in ("mine", "theirs", "both"):
+        return {"ok": False, "message": "action 必须是 mine / theirs / both"}
+    repo, err = _locate_repo()
+    if not repo:
+        return {"ok": False, "message": err}
+    unmerged = _unmerged_paths(repo)
+    if file not in unmerged:
+        msg = (f"{file} 不在冲突清单里。当前冲突：\n  " + "\n  ".join(unmerged)) \
+            if unmerged else f"{file} 不在冲突清单里（可能已经处理完了）。"
+        return {"ok": False, "message": msg}
+    in_rebase = _rebase_in_progress(repo)
+    if action in ("mine", "theirs"):
+        stage = "3" if action == "mine" else "2"
+        p = _git(["show", f":{stage}:{file}"], cwd=repo, timeout=30)
+        if p.returncode != 0:
+            return {"ok": False, "message": "读取冲突文件两侧内容失败：\n" + (p.stdout + p.stderr).strip()}
+        content = p.stdout
+    else:
+        sides = {}
+        for stage in ("3", "2"):
+            ps = _git(["show", f":{stage}:{file}"], cwd=repo, timeout=30)
+            if ps.returncode != 0:
+                return {"ok": False, "message": "读取冲突文件两侧内容失败：\n" + (ps.stdout + ps.stderr).strip()}
+            try:
+                sides[stage] = json.loads(ps.stdout)
+            except Exception:
+                return {"ok": False, "message": "有一侧的内容不是合法 JSON（可能被手工改过），"
+                                                "「两边拼接」做不了；请选「保留我的 / 保留对方的」"
+                                                "或到终端处理。"}
+        # 本方为底：对方的非空差异按合并规则补齐或转存，谁的信息都不丢
+        merged, _cf = merge_two_jobs(sides["3"], sides["2"])
+        merged["id"] = Path(file).stem
+        content = json.dumps(ordered_job(merged), ensure_ascii=False, indent=2)
+    try:
+        (repo / file).write_text(content, encoding="utf-8")
+    except OSError as e:
+        return {"ok": False, "message": f"写回冲突文件失败：{e}"}
+    _git(["add", "--", file], cwd=repo, timeout=30)
+
+    remaining = _unmerged_paths(repo)
+    if remaining:
+        return {"ok": True, "finished": False, "remaining": remaining}
+    note = ""
+    if in_rebase:
+        c = _git(["rebase", "--continue"], cwd=repo, timeout=120, env_extra={"GIT_EDITOR": "true"})
+        if c.returncode != 0:
+            return {"ok": False, "message": "冲突已解决，但 git rebase --continue 失败：\n"
+                                            + (c.stdout + c.stderr).strip()}
+    elif _LAST_SYNC_STASH.get(str(repo)):
+        d = _git(["stash", "drop"], cwd=repo, timeout=30)
+        if d.returncode == 0:
+            note = "，stash 里的临时改动已清理"
+        _LAST_SYNC_STASH.pop(str(repo), None)
+    with jobs_lock(), _JOBS_LOCK, _LOCAL_LOCK:
+        rr = reindex()
+    return {"ok": True, "finished": True, "remaining": [], "note": note, **rr}
+
+
 # ---------------------------------------------------------------- HTTP
 
 def safe_route(fn):
@@ -1653,6 +1749,22 @@ class Handler(BaseHTTPRequestHandler):
         if m:
             job = load_shared(m.group(1))
             if not job:
+                p = job_path(m.group(1))
+                if p and p.exists():
+                    # 文件在、读不出：多半是 git 冲突标记。裸 404 会让用户以为岗位丢了
+                    try:
+                        head = p.read_text(encoding="utf-8", errors="replace")
+                    except OSError:
+                        head = ""
+                    if "<<<<<<<" in head:
+                        repo, _err = _locate_repo()
+                        phase = "rebase" if (repo and _rebase_in_progress(repo)) else "stash"
+                        return self.send_json({
+                            "error": "这个岗位的文件里还有未处理的 git 冲突标记，"
+                                     "处理完之前它不会出现在列表里。",
+                            "conflict_file": f"jobs/{p.name}", "phase": phase,
+                            "guide": "按页面顶部的冲突提示选「保留我的 / 保留对方的 / 两边拼接」，"
+                                     "或到终端运行 git status 查看现场。"}, 409)
                 return self.send_json({"error": "not found"}, 404)
             merged = merge_local(job)
             kws = cv_keywords()
@@ -1695,6 +1807,9 @@ class Handler(BaseHTTPRequestHandler):
             return self.send_json(git_sync())
         if path == "/api/push":
             return self.send_json(git_push(self.read_body().get("message", "")))
+        if path == "/api/conflict/resolve":
+            b = self.read_body()
+            return self.send_json(conflict_resolve(b.get("file", ""), b.get("action", "")))
         if path == "/api/dedupe":
             # 只合并强信号的重复组（同职位号 / 同链接）。名字相似属于疑似，
             # 同一家公司不同部门完全可能有同名岗位，那种要人来判断。

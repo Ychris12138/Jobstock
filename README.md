@@ -171,8 +171,9 @@ python install.py --data-dir "D:\jobs-data" --cv-dir "~/Documents/my-cv"
    localhost:8770/api/reindex`），刷新即可看到。
 3. **拉合作者的**：点「⇩ 拉取合作者数据」，等价于 `git pull --rebase --autostash`
    + 重建索引。带 `--autostash` 是必需的：在 WebUI 里编辑过岗位后工作区就是脏的，
-   不 autostash 的话 git 会直接拒绝 rebase。失败时（例如 rebase 冲突）会自动
-   `git rebase --abort` 把仓库恢复到同步前的状态，不会把你留在 detached HEAD 上。
+   不 autostash 的话 git 会直接拒绝 rebase。遇到冲突时不甩锅给终端：页面会给每个
+   冲突文件提供「保留我的 / 保留对方的 / 两边拼接」三个动作，全部处理完自动继续
+   （你的原始改动始终留在 git stash 里，处理完自动清理）。
 4. **推给合作者的**：点「⇧ 推送」。它先列出 `jobs/` 下待提交的文件与未推送的
    commit，你确认后才 commit + push（只圈 `jobs/`，个人进度与 CV 永远不推）；
    远端有新提交时会先自动拉平再推。按钮常驻显示「未推送 N」—— 这个数字就是
@@ -244,13 +245,14 @@ python install.py --data-dir "D:\jobs-data" --cv-dir "~/Documents/my-cv"
 | 方法 | 路径 | 说明 |
 |---|---|---|
 | GET | `/api/jobs?status=&company=&location=&position=&category=&recruit_type=&source=&tag=&deadline_before=&min_match=&q=&sort=&hide_archived=1&hide_closed=1` | 列表（读 sqlite 索引），响应含 `facets`（各维度已有取值）、`statuses`、`categories`、`recruit_types`、`cv_keywords`（本机 CV 关键词）、`stats`（截止提醒，**不受筛选影响**）。每行带 `match_hits` / `match_kw` / `days_left` / `closed`。除 `deadline_before/min_match/q/sort/hide_*` 外，参数均可重复传多个值；`location` 多值取 OR，`tag` 多值取 AND。`sort` 走白名单（`updated`/`deadline`/`match`/`created`/`company`），认不出的退回默认 |
-| GET | `/api/jobs/<id>` | 单条完整 JSON（共享字段 + 本机状态的合并视图），额外含 `history`（投递时间线）、`applied_at`、`match_kw`、`cv_keywords` |
+| GET | `/api/jobs/<id>` | 单条完整 JSON（共享字段 + 本机状态的合并视图），额外含 `history`（投递时间线）、`applied_at`、`match_kw`、`cv_keywords`。文件存在但含未解决的 git 冲突标记时返回 409 与处理引导，而不是裸 404 |
 | POST | `/api/jobs` | 新增（company/position 必填）；`status`/`my_notes` 会被分流到本地 |
 | PUT | `/api/jobs/<id>` | 修改；共享字段**真的变了**才写 JSON 并更新 `updated_at`（空串与缺失字段视为相等，所以 no-op 保存不产生 git diff）。改共享字段必须带 `base_rev`（乐观锁，不匹配返回 409；`"*"` 强制覆盖），只改个人字段不需要 |
 | POST | `/api/jobs/<id>/status` | 快捷改状态 `{ "status": "已投递" }` —— **只写本地** |
 | POST | `/api/reindex` | 从 JSON + 本地状态重建索引；响应含 `skipped`（读不出来/id 重复的文件）、`warnings`（日期格式、枚举外的取值）与 `duplicates`（重复岗位组），**不会静默吞掉岗位** |
 | POST | `/api/dedupe` | 合并强信号的重复岗位组（同职位号 / 同投递链接），返回合并了哪些 |
-| POST | `/api/sync` | `git pull --rebase --autostash` 拉取合作者数据后重建索引（只拉不推）。rebase 失败会自动 `--abort` 恢复；autostash 贴回冲突时（git 此时退出码是 0）也判为失败并说清楚改动在 stash 里。成功时响应带 `changes`：新增 / 更新 / 被下架三桶（被下架的带上你的本机状态，供红字示警） |
+| POST | `/api/sync` | `git pull --rebase --autostash` 拉取合作者数据后重建索引（只拉不推）。遇到冲突时**保留现场**并返回 `conflict`/`phase`/`files`，交由 `/api/conflict/resolve` 在页面上处理（全部处理完自动继续）；成功时响应带 `changes`：新增 / 更新 / 被下架三桶（被下架的带上你的本机状态，供红字示警） |
+| POST | `/api/conflict/resolve` | 冲突三选一：`{file, action: mine\|theirs\|both}`。按 git stage 号取两侧内容（3=本方、2=对方，避开 `--ours/--theirs` 在 rebase 场景的语义反转）；`both` 做字段级合并。全部文件处理完自动 `rebase --continue` / 清理 stash 并重建索引 |
 | POST | `/api/push` | 提交 `jobs/` 下的共享层改动并推送。message 可自定义，留空自动生成；远端较新时先自动拉平再推一次，仍冲突则返回 `conflict` 与文件清单。**只圈 `jobs/`** |
 | GET | `/api/git_status` | 本地 git 状态：`ahead`（未推送 commit 数）、`upstream`、`dirty`（jobs/ 下待提交清单）、`unpushed_commits`、`last_commit_at`。`behind` 要 `?fetch=1` 才算（网络调用，不进页面加载路径） |
 | GET | `/api/cv` | CV 原文件列表 + 解读文件（含解析出的关键词）+ 解读提示词 |
