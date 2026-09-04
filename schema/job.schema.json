@@ -1,0 +1,60 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "job-stock 岗位记录（共享层）",
+  "description": "jobs/<id>.json 的结构约定。这是文档形式；服务端实际校验以 server.py 为准（写入走 bad_values → 400，重建索引走 reindex → skipped/warnings 报告）。本版本表达不了的值会被保留并告警，不会被清掉。",
+  "type": "object",
+  "required": ["id", "company", "position"],
+  "additionalProperties": true,
+  "properties": {
+    "id": {
+      "type": "string",
+      "description": "有官方职位号：<公司>-<职位号小写>（如 字节跳动-a212198a）；没有则 <公司>-<岗位名>。尽量填 job_no，这是去重的主要依据。补 job_no 会引发 id 升级与文件改名（自动处理）。"
+    },
+    "company":  { "type": "string", "minLength": 1 },
+    "position": { "type": "string", "minLength": 1 },
+    "job_no":   { "type": "string", "description": "官方职位号，如 A212198A" },
+    "category": {
+      "type": "string",
+      "description": "岗位一级分类，受控枚举（枚举外的值保留并告警）：算法 / 研究 / 数据 / 量化 / 后端 / Infra / 前端 / 硬件 / 产品 / 其他"
+    },
+    "recruit_type": {
+      "type": "string",
+      "description": "受控枚举：校招 / 社招 / 实习。不要混进 tags。"
+    },
+    "url":      { "type": "string", "description": "投递/详情页链接" },
+    "locations": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "工作地点，多值数组。多地可选就全列上。单个取值内不含逗号（索引层逗号拼接）。"
+    },
+    "salary":   { "type": "string" },
+    "source":   { "type": "string", "description": "如：官网 / 牛客 / 内推" },
+    "deadline": {
+      "type": "string",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}$",
+      "description": "YYYY-MM-DD。格式不对不会被丢弃，但该岗位进不了截止日期筛选与提醒。"
+    },
+    "tags": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "主题属性（如 AI4S / 2027届 / 分子动力学）。城市与招聘类型不要写在这里。"
+    },
+    "notes":    { "type": "string", "description": "公共备注：对大家都有用的情报（内推码期限、门槛等）。个人记录写 local/status.json 的 my_notes。" },
+    "jd":       { "type": "string", "description": "JD 原文快照" },
+    "closed":   {
+      "type": "boolean",
+      "description": "岗位已下架/关闭（客观事实，共享层）。为假时整个字段不落盘。手写时 true / \"1\" / \"是\" / \"已下架\" 都认。与「已归档」（个人选择）不是一回事。"
+    },
+    "created_at": { "type": "string", "pattern": "^\\d{4}-\\d{2}-\\d{2} \\d{2}:\\d{2}$" },
+    "updated_at": { "type": "string", "pattern": "^\\d{4}-\\d{2}-\\d{2} \\d{2}:\\d{2}$" }
+  },
+  "forbidden_in_shared_layer": {
+    "status": "投递状态是个人层数据，写进共享 JSON 会在启动时被自动搬走（见 local/status.json）",
+    "my_notes": "个人备注同上",
+    "history": "投递时间线由系统维护在个人层"
+  },
+  "local_layer": {
+    "file": "local/status.json（不进 git，只留本机）",
+    "shape": "{ \"<job_id>\": { \"status\": \"待投递|已投递|笔试|面试|Offer|已拒绝|已归档\", \"my_notes\": \"...\", \"history\": [{\"status\": \"...\", \"at\": \"YYYY-MM-DD HH:mm\"}] } }"
+  }
+}
