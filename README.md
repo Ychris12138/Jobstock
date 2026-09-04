@@ -248,7 +248,7 @@ python install.py --data-dir "D:\jobs-data" --cv-dir "~/Documents/my-cv"
 | POST | `/api/jobs/<id>/status` | 快捷改状态 `{ "status": "已投递" }` —— **只写本地** |
 | POST | `/api/reindex` | 从 JSON + 本地状态重建索引；响应含 `skipped`（读不出来/id 重复的文件）、`warnings`（日期格式、枚举外的取值）与 `duplicates`（重复岗位组），**不会静默吞掉岗位** |
 | POST | `/api/dedupe` | 合并强信号的重复岗位组（同职位号 / 同投递链接），返回合并了哪些 |
-| POST | `/api/sync` | `git pull --rebase --autostash` 拉取合作者数据后重建索引（只拉不推）。rebase 失败会自动 `--abort` 恢复；autostash 贴回冲突时（git 此时退出码是 0）也判为失败并说清楚改动在 stash 里 |
+| POST | `/api/sync` | `git pull --rebase --autostash` 拉取合作者数据后重建索引（只拉不推）。rebase 失败会自动 `--abort` 恢复；autostash 贴回冲突时（git 此时退出码是 0）也判为失败并说清楚改动在 stash 里。成功时响应带 `changes`：新增 / 更新 / 被下架三桶（被下架的带上你的本机状态，供红字示警） |
 | POST | `/api/push` | 提交 `jobs/` 下的共享层改动并推送。message 可自定义，留空自动生成；远端较新时先自动拉平再推一次，仍冲突则返回 `conflict` 与文件清单。**只圈 `jobs/`** |
 | GET | `/api/git_status` | 本地 git 状态：`ahead`（未推送 commit 数）、`upstream`、`dirty`（jobs/ 下待提交清单）、`unpushed_commits`、`last_commit_at`。`behind` 要 `?fetch=1` 才算（网络调用，不进页面加载路径） |
 | GET | `/api/cv` | CV 原文件列表 + 解读文件（含解析出的关键词）+ 解读提示词 |

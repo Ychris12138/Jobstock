@@ -630,8 +630,30 @@ async function syncRepo() {
   const d = await api('/api/sync', {body: {}});
   if (!d.ok) { notice('⚠️ 同步失败：\n' + esc(d.message)); alert('同步失败，详情见页面顶部提示。'); return; }
   showReport(d, `已拉取合作者数据：${d.count} 条岗位`);
-  alert(`已拉取合作者数据，现共 ${d.count} 条岗位。\n` +
-        `注意：这只是「拉取」，你自己新增的岗位还没有推送给别人。\n\n${d.message}`);
+  // 变更摘要：只弹一句「拉取成功」的话，没人知道合作者到底改了什么——
+  // 尤其「别人下架了你还在推进的岗位」，必须红字示警而不是让它从列表里静默消失。
+  const ch = d.changes;
+  if (ch) {
+    const fmt = x => `${esc(x.company)} ${esc(x.position)}`;
+    const doing = ['已投递', '笔试', '面试'];
+    let html = '';
+    if (ch.new.length) html += `🆕 合作者新增 ${ch.new.length} 条：` + ch.new.map(fmt).join('；') + '\n';
+    if (ch.updated.length) html += `✏️ 更新 ${ch.updated.length} 条：` + ch.updated.map(fmt).join('；') + '\n';
+    if (ch.closed.length) {
+      html += `🚫 被标记下架 ${ch.closed.length} 条：` + ch.closed.map(x => {
+        const mine = doing.includes(x.my_status);
+        return (mine ? '<b style="color:#e03131">' : '') + fmt(x)
+          + (x.my_status && x.my_status !== '待投递' ? `（你的状态：${esc(x.my_status)}）` : '')
+          + (mine ? '</b>' : '');
+      }).join('；') + '\n';
+      if (ch.closed.some(x => doing.includes(x.my_status)))
+        html += '🔴 红色的岗位你还在推进 —— 点开确认一下，别按旧 JD 准备到最后一刻。\n';
+    }
+    notice(html || '');
+  }
+  alert(`已拉取合作者数据，现共 ${d.count} 条岗位。` +
+        (ch && (ch.new.length + ch.updated.length + ch.closed.length)
+          ? `\n变更摘要见页面顶部提示。` : ''));
   loadJobs();
 }
 

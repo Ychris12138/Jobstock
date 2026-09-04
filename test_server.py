@@ -451,6 +451,21 @@ check((ALICE / "jobs" / "合作者岗.json").exists(), "合作者的新岗位被
 check(json.loads((ALICE / "jobs" / "共享岗.json").read_text(encoding="utf-8"))["salary"] == "35K",
       "本机未提交的改动在 autostash 后被完整还原")
 check(r13.get("count") == 2, "拉取后重建索引，条数正确")
+ch13 = r13.get("changes") or {}
+check({x["id"] for x in ch13.get("new", [])} == {"合作者岗"}, "变更摘要：合作者的新岗位进 new 桶")
+check(all(x["id"] != "共享岗" for x in ch13.get("updated", [])),
+      "本机未提交的改动不进变更摘要（git diff 基准，不是索引快照）")
+
+# 下架摘要：乙标记下架并推送；甲本机对该岗位还在「面试」，摘要必须把状态带出来
+server.update_local("合作者岗", {"status": "面试"})
+write_job(BOB, "合作者岗", company="乙公司", position="乙岗位", closed=True)
+git("add", "-A", cwd=BOB)
+git("commit", "-m", "bob 下架", cwd=BOB)
+git("push", cwd=BOB)
+r13s = server.git_sync()
+closed13 = [x for x in (r13s.get("changes") or {}).get("closed", []) if x["id"] == "合作者岗"]
+check(bool(closed13) and closed13[0]["my_status"] == "面试",
+      "被下架的岗位进 closed 桶，且带上本机自己的投递状态")
 
 # 双方改同一个岗位 → autostash 贴回来时冲突。git 这时退出码是 0，
 # 不额外检查工作区的话会报「同步完成」，而共享 JSON 里已经写进了冲突标记。

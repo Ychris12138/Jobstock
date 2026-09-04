@@ -1281,6 +1281,10 @@ def git_sync():
 
 def _pull_and_reindex(repo):
     """pull → 迁移 → 重建索引的公共主体。调用方必须已持有 .sync.lock 与各层锁。"""
+    old_rev = ""
+    p0 = _git(["rev-parse", "HEAD"], cwd=repo, timeout=20)
+    if p0.returncode == 0:
+        old_rev = p0.stdout.strip()
     try:
         p = _git(["pull", "--rebase", "--autostash"], cwd=repo, timeout=60)
     except subprocess.TimeoutExpired:
@@ -1319,7 +1323,53 @@ def _pull_and_reindex(repo):
 
     migrate()
     migrate_ids()
-    return {"ok": True, "message": out, **reindex()}
+    return {"ok": True, "message": out, "changes": _sync_changes(repo, old_rev),
+            **reindex()}
+
+
+def _sync_changes(repo, old_rev):
+    """拉取前后的 jobs/ 差异，按「新增 / 更新 / 被下架」分类，供页面摘要展示。
+
+    基准必须是 git 的 old..HEAD 而不是索引快照：索引快照会把同步期间本机自己的
+    写入、autostash 贴回的本地改动都误报成「拉到的变更」。git diff 只含真正被
+    拉下来的 commit 触及的文件。（本机已 commit 未推送的提交经 rebase 后也在
+    这个区间里 —— 那是你自己的改动，列出来无害。）
+
+    「被下架」桶会带上本机自己的投递状态：合作者下了一个你还在面试的岗位，
+    这条必须红字示警，而不是让你从列表里找不到它时以为数据丢了。
+    """
+    empty = {"new": [], "updated": [], "closed": []}
+    if not old_rev:
+        return empty
+    p = _git(["diff", "--name-status", old_rev, "HEAD", "--", "jobs"], cwd=repo, timeout=30)
+    if p.returncode != 0:
+        return empty
+    new_l, upd_l, closed_l = [], [], []
+    table = load_local()
+    for line in p.stdout.splitlines():
+        parts = line.split("\t")
+        if len(parts) < 2:
+            continue
+        st, names = parts[0], parts[1:]
+        path = names[-1] if st.startswith("R") else names[0]     # 重命名取新名
+        name = Path(path).name
+        if not name.endswith(".json") or name.startswith("."):
+            continue
+        job = load_shared(name[:-len(".json")])
+        if not job:
+            continue
+        item = {"id": job["id"], "company": norm_text(job.get("company")),
+                "position": norm_text(job.get("position"))}
+        if norm_bool(job.get("closed")):
+            rec = table.get(job["id"])
+            item["my_status"] = ((norm_text(rec.get("status")) or "待投递")
+                                 if isinstance(rec, dict) else "待投递")
+            closed_l.append(item)
+        elif st.startswith("A"):
+            new_l.append(item)
+        else:
+            upd_l.append(item)
+    return {"new": new_l, "updated": upd_l, "closed": closed_l}
 
 
 def git_status(fetch=False):
