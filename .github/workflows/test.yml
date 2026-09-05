@@ -1,0 +1,23 @@
+# 零依赖 CI：只跑标准库自测，无 pip install。
+# 防的是「agent 改坏数据逻辑」—— 多人协作 + AI 批量写数据的工作流里，
+# 断言红了必须挡在 push/PR 上，而不是等某台机器跑 --reindex 时才炸出来。
+name: test
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python test_server.py

@@ -277,13 +277,17 @@ python install.py --data-dir "D:\jobs-data" --cv-dir "~/Documents/my-cv"
 | GET | `/api/git_status` | 本地 git 状态：`ahead`（未推送 commit 数）、`upstream`、`dirty`（jobs/ 下待提交清单）、`unpushed_commits`、`last_commit_at`。`behind` 要 `?fetch=1` 才算（网络调用，不进页面加载路径） |
 | GET | `/api/cv` | CV 原文件列表 + 解读文件（含解析出的关键词）+ 解读提示词 |
 
+> 想要表格/CSV 形态的数据？索引库本来就是标准 sqlite，一行命令导出，无需任何功能开发：
+> `sqlite3 -header -csv data/jobs.db "SELECT company, position, url, deadline FROM jobs" > jobs.csv`
+
 ## 自测
 
 ```bash
 python3 test_server.py
 ```
 
-用合成数据在临时目录里跑 161 条断言，不会碰你真实的 `jobs/` 与 `local/`。覆盖：
+用合成数据在临时目录里跑全部断言（当前 240 条，以运行输出为准），不会碰你真实的
+`jobs/` 与 `local/`。覆盖：
 数据分层与 no-op 保存不产生 diff、迁移幂等且保留未知字段、多地点筛选、
 枚举外的值不被静默清空、
 乐观锁冲突、个人状态文件损坏时拒绝写入、reindex 对坏文件/缺 id/重复 id 的报告、

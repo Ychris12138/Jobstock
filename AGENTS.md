@@ -82,8 +82,9 @@ server 的所有写路径遵守一条全局锁序（详见 `server.py` 顶部注
 
 - **保持零依赖**：只用 Python 标准库 + 原生 JS。不引入 npm、pip 包、构建步骤。
 - 改数据结构相关逻辑后，同步更新 `schema/job.schema.json`、`README.md` 和本文件。
-- **改完必须跑自测**：`python test_server.py`（161 条断言，合成数据，不碰真实
-  jobs/ 与 local/）。断言红了不许交付。
+- **改完必须跑自测**：`python test_server.py`（合成数据，不碰真实 jobs/ 与
+  local/；断言总数以运行输出为准）。断言红了不许交付。CI 会在 ubuntu 与
+  windows 双平台自动跑同一套断言。
 - Windows 与 macOS 都要能跑：路径一律 `pathlib`。
 
 ## 6. 常用命令速查
