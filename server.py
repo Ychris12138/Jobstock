@@ -1788,6 +1788,40 @@ class Handler(BaseHTTPRequestHandler):
         except Exception:
             pass
 
+    # 浏览器访问本机服务时的合法 Host（去端口后）。服务只绑 127.0.0.1，但 DNS
+    # rebinding 可以让恶意网页的域名解析到 127.0.0.1 —— 浏览器视其为同源，
+    # 能读走投递记录、个人备注，甚至 /api/cv/file/ 的 CV 原文。校验 Host 一条 if 挡掉。
+    LOCAL_HOSTS = ("localhost", "127.0.0.1", "::1")
+
+    def guard_request(self):
+        """入口统一校验（Host / Sec-Fetch-Site / Content-Type）。返回 True 表示已拒绝。"""
+        h = self.headers.get("Host") or ""
+        if h.startswith("["):                     # IPv6 字面量 [::1]:8770
+            host = h[1:h.index("]")].lower() if "]" in h else h.lower()
+        else:
+            host = h.split(":")[0].strip().lower()
+        if host and host not in self.LOCAL_HOSTS:
+            self.send_json({"error": "拒绝访问：Host 不是本机地址（若你在反向代理后面访问，"
+                                     "请把 Host 头改写为 localhost）"}, 403)
+            return True
+        # 浏览器跨站请求必带 Sec-Fetch-Site。挡的是「恶意网页对 localhost 发简单
+        # POST」—— /api/sync、/api/dedupe 这类不读 body 的写端点，Content-Type
+        # 校验拦不住空 body 的跨站触发。curl / 脚本不发这个头，完全不受影响
+        sfs = (self.headers.get("Sec-Fetch-Site") or "").strip().lower()
+        if sfs and sfs not in ("same-origin", "same-site", "none"):
+            self.send_json({"error": "拒绝跨站请求"}, 403)
+            return True
+        try:
+            n = int(self.headers.get("Content-Length", 0))
+        except ValueError:
+            n = 0
+        if n > 0:
+            ct = (self.headers.get("Content-Type") or "").split(";")[0].strip().lower()
+            if ct and ct != "application/json":
+                self.send_json({"error": "Content-Type 必须是 application/json"}, 415)
+                return True
+        return False
+
     def send_file(self, path, ctype):
         try:
             body = path.read_bytes()
@@ -1870,6 +1904,8 @@ class Handler(BaseHTTPRequestHandler):
     # ---- routes ----
     @safe_route
     def do_GET(self):
+        if self.guard_request():
+            return
         url = urllib.parse.urlparse(self.path)
         path = urllib.parse.unquote(url.path)
         query = urllib.parse.parse_qs(url.query)
@@ -1936,6 +1972,8 @@ class Handler(BaseHTTPRequestHandler):
 
     @safe_route
     def do_POST(self):
+        if self.guard_request():
+            return
         path = urllib.parse.unquote(urllib.parse.urlparse(self.path).path)
         if path == "/api/reindex":
             mig_w = apply_id_migrations()
@@ -2045,6 +2083,8 @@ class Handler(BaseHTTPRequestHandler):
 
     @safe_route
     def do_PUT(self):
+        if self.guard_request():
+            return
         m = re.fullmatch(r"/api/jobs/([^/]+)",
                          urllib.parse.unquote(urllib.parse.urlparse(self.path).path))
         if not m:

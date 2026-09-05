@@ -1162,6 +1162,24 @@ check(code == 200, "备份失败不阻塞主写（主写成功才是硬要求）
 (bdir27).unlink()
 (TMP / "local" / "backups.bak").rename(bdir27)
 
+# ---- 28. 入口校验三件套 ----------------------------------------------------------
+print("\n【28】入口校验三件套")
+code, d = raw_http("GET", "/api/jobs", {"Host": "evil.com"})
+check(code == 403, "Host 不是本机地址被拒绝（DNS rebinding 拿不到数据）")
+code, d = raw_http("GET", "/api/jobs", {"Host": f"localhost:{PORT}"})
+check(code == 200, "localhost 带端口照常放行")
+code, d = raw_http("POST", "/api/dedupe", {"Host": f"127.0.0.1:{PORT}",
+                                           "Sec-Fetch-Site": "cross-site"}, b"{}")
+check(code == 403, "浏览器跨站触发的写端点被拒绝（空 body 也逃不过 Sec-Fetch-Site）")
+code, d = raw_http("POST", "/api/sync", {"Host": f"127.0.0.1:{PORT}",
+                                         "Sec-Fetch-Site": "same-origin"}, b"{}")
+check(code == 200, "同源的正常请求不受影响")
+code, d = raw_http("PUT", "/api/jobs/精简岗位",
+                   {"Host": f"127.0.0.1:{PORT}", "Content-Type": "text/plain"}, b"{}")
+check(code == 415, "非 JSON 的 Content-Type 被拒绝")
+code, d = raw_http("POST", "/api/sync", {"Host": f"127.0.0.1:{PORT}"})   # 无 body 无 CT
+check(code == 200, "无 body 的 curl 式 POST 不受影响（AGENTS.md 的用法保持可用）")
+
 SRV.shutdown()
 shutil.rmtree(TMP, ignore_errors=True)
 print(f"\n{'='*46}\n通过 {PASSED} 项，失败 {FAILED} 项\n{'='*46}")
