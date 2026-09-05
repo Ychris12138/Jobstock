@@ -160,6 +160,23 @@
               font-size: 11px; font-weight: 700; margin-left: 5px; }
   /* 未推送徽标：红色实心 = 有 commit 停在本机、合作者还看不到 */
   #push-btn.push-hot { background: #e03131; border-color: #e03131; color: #fff; font-weight: 700; }
+
+  /* 移动端：网页不开就没有提醒，而查「明天截止什么」恰恰多发生在手机碎片段 */
+  .tbl-wrap { overflow-x: auto; }
+  @media (max-width: 720px) {
+    header { flex-wrap: wrap; gap: 10px; padding: 14px 16px; }
+    nav { width: 100%; }
+    main { padding: 14px 12px; }
+    /* 16px 以上 iOS 不会在聚焦输入框时自动放大；触控目标也顺手变大 */
+    input, select, textarea { font-size: 16px; padding: 10px 12px; }
+    .tag-pick { padding: 8px 16px; font-size: 14px; }
+    .btn { padding: 10px 18px; font-size: 14px; }
+    th, td { padding: 10px; }
+    /* 窄屏上薪资/更新时间列让位：公司、岗位、地点、状态、截止才是通勤时要看的信息 */
+    .col-salary, .col-updated { display: none; }
+    dialog { padding: 18px 16px; }
+    .form-grid { grid-template-columns: 76px 1fr; }
+  }
 </style>
 </head>
 <body>
@@ -212,16 +229,18 @@
       <label class="check muted"><input type="checkbox" id="f-closed" checked onchange="loadJobs()">隐藏已下架</label>
     </div>
     <div class="tagbar" id="tagbar"></div>
+    <div class="tbl-wrap">
     <table id="tbl">
       <thead><tr>
         <th>公司</th><th>岗位</th><th>分类 / 类型</th><th>工作地点</th>
         <th class="col-match" title="岗位文本命中了几个 CV 关键词">匹配 <span class="local-mark">仅本机</span></th>
-        <th>薪资</th>
+        <th class="col-salary">薪资</th>
         <th>状态 <span class="local-mark">仅本机</span></th>
-        <th>截止</th><th>更新</th><th>快捷状态</th>
+        <th>截止</th><th class="col-updated">更新</th><th>快捷状态</th>
       </tr></thead>
       <tbody id="rows"></tbody>
     </table>
+    </div>
   </section>
 
   <section id="page-cv" hidden>
@@ -483,9 +502,61 @@ function matchCell(j) {
 }
 
 // 截止提醒条。统计口径见后端 deadline_stats：不受当前筛选影响。
+// 出口同样重要：网页不开 = 没有提醒。复制成 Markdown 可贴进周报/群，
+// 下载 .ics 进系统日历后由日历负责推送 —— 这是在零依赖下最接近「通知」的形态。
+let CUR_STATS = null;
+
+function icsEscape(s) {
+  return String(s).replace(/\\/g, '\\\\').replace(/;/g, '\\;').replace(/,/g, '\\,').replace(/\r?\n/g, '\\n');
+}
+
+function copyDue() {
+  const st = CUR_STATS;
+  if (!st) return;
+  const line = it => {
+    const when = it.days < 0 ? `已过期 ${-it.days} 天`
+      : it.days === 0 ? '今天截止' : `剩 ${it.days} 天`;
+    return `- ${it.company} ${it.position}（${it.deadline}，${when}）`;
+  };
+  const txt = '⏰ 岗位截止提醒（来自 job-stock）\n'
+    + (st.overdue || []).map(line).join('\n')
+    + ((st.overdue || []).length && (st.soon || []).length ? '\n' : '')
+    + (st.soon || []).map(line).join('\n');
+  navigator.clipboard.writeText(txt)
+    .then(() => alert('已复制，可直接贴进周报或群里'))
+    .catch(() => alert('复制失败，请手动选中复制'));
+}
+
+function downloadICS() {
+  const st = CUR_STATS;
+  const items = st ? [...(st.overdue || []), ...(st.soon || [])] : [];
+  if (!items.length) return;
+  const stamp = new Date().toISOString().replace(/[-:]/g, '').replace(/\.\d+/, '');
+  const lines = ['BEGIN:VCALENDAR', 'VERSION:2.0', 'PRODID:-//job-stock//CN'];
+  for (const it of items) {
+    if (!it.deadline) continue;
+    const d = it.deadline.replace(/-/g, '');
+    const next = addDays(it.deadline, 1).replace(/-/g, '');
+    lines.push('BEGIN:VEVENT',
+      `UID:${encodeURIComponent(it.id)}@job-stock`,
+      `DTSTAMP:${stamp}`,
+      'DTSTART;VALUE=DATE:' + d,
+      'DTEND;VALUE=DATE:' + next,
+      `SUMMARY:${icsEscape('截止：' + it.company + ' ' + it.position)}`,
+      'END:VEVENT');
+  }
+  lines.push('END:VCALENDAR');
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(new Blob([lines.join('\r\n')], {type: 'text/calendar;charset=utf-8'}));
+  a.download = 'job-stock-deadline.ics';
+  a.click();
+  URL.revokeObjectURL(a.href);
+}
+
 function renderDue(st) {
   const box = document.getElementById('due');
   const soon = st.soon || [], over = st.overdue || [];
+  CUR_STATS = st;
   if (!soon.length && !over.length) { box.hidden = true; return; }
   const head = [];
   if (soon.length) head.push(`<b>${soon.length}</b> 个岗位 ${st.soon_days} 天内截止`);
@@ -495,7 +566,9 @@ function renderDue(st) {
     + (it.days < 0 ? `过期 ${-it.days} 天` : it.days === 0 ? '今天' : `剩 ${it.days} 天`) + '）';
   box.innerHTML = `<span>⏰ ${head.join(' · ')}：`
     + all.slice(0, 3).map(one).join('；') + (all.length > 3 ? ' …' : '') + '</span>'
-    + `<button class="btn small" onclick="focusDue()">只看这些</button>`;
+    + `<button class="btn small" onclick="focusDue()">只看这些</button>`
+    + `<button class="btn small" onclick="copyDue()" title="复制成 Markdown，可贴进周报或群">⧉ 复制</button>`
+    + `<button class="btn small" onclick="downloadICS()" title="下载 .ics，导入系统日历后就能收到提醒">📅 日历</button>`;
   box.hidden = false;
 }
 
@@ -571,11 +644,11 @@ async function loadJobs() {
         return `<span class="loc" style="color:${col};background:${col}1a;border-color:${col}40">${esc(c)}</span>`;
       }).join('')}</div></td>
       ${matchCell(j)}
-      <td>${esc(j.salary)}</td>
+      <td class="col-salary">${esc(j.salary)}</td>
       <td><span class="badge st-${esc(j.status)}">${esc(j.status)}</span>
         ${j.status_updated_at ? `<span class="sub-time">${esc(j.status_updated_at.slice(5))}</span>` : ''}</td>
       <td>${dlCell(j)}</td>
-      <td class="muted"${j.updated_by ? ` title="由 ${esc(j.updated_by)} 最后更新"` : ''}>${esc((j.updated_at || '').slice(5))}</td>
+      <td class="col-updated muted"${j.updated_by ? ` title="由 ${esc(j.updated_by)} 最后更新"` : ''}>${esc((j.updated_at || '').slice(5))}</td>
       <td onclick="event.stopPropagation()">
         <select onchange="quickStatus('${encodeURIComponent(j.id)}', this.value)">
           <option value="">改状态…</option>
@@ -935,7 +1008,8 @@ async function loadCV() {
 
 function copyPrompt() {
   navigator.clipboard.writeText(document.getElementById('cv-prompt').textContent)
-    .then(() => alert('提示词已复制'));
+    .then(() => alert('提示词已复制'))
+    .catch(() => alert('复制失败，请手动选中复制'));
 }
 
 loadJobs();
