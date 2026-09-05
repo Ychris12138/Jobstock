@@ -1098,10 +1098,6 @@ git("push", cwd=MA)
 server.configure(data_dir=str(MB), cv_dir=str(MB / "cv"))
 r25 = server.git_sync()
 tbl_b = json.loads((MB / "local" / "status.json").read_text(encoding="utf-8"))
-print("PROBE r25:", {k: v for k, v in r25.items() if k in ("ok", "migrations", "message")}, file=__import__("sys").stderr)
-print("PROBE tbl_b keys:", list(tbl_b.keys()), file=__import__("sys").stderr)
-print("PROBE migrations file:", (MB / "jobs" / ".id-migrations").exists(), file=__import__("sys").stderr)
-print("PROBE jobs:", [p.name for p in (MB / "jobs").iterdir()], file=__import__("sys").stderr)
 check("待广播岗" not in tbl_b and tbl_b.get(NEW_ID25, {}).get("status") == "已投递",
       "乙 pull 后旧 id 上的投递进度自动搬到新 id（旧版静默归零且报成功）")
 check(tbl_b[NEW_ID25]["my_notes"] == "乙的记录", "个人备注一并搬过去")
@@ -1141,6 +1137,30 @@ check(server.fuzzy_key("Schrödinger") == server.fuzzy_key("Schrodinger"), "fuzz
 check(server.canonical_id({"company": "Schrödinger", "position": "X"})
       == server.canonical_id({"company": "Schrodinger", "position": "X"}),
       "变音符公司算出同一个 id，重复拦得住")
+
+# ---- 27. 个人层滚动备份 ----------------------------------------------------------
+print("\n【27】个人层滚动备份")
+server.update_local("备份岗", {"status": "已投递"})
+server.update_local("备份岗", {"status": "笔试"})
+for i in range(14):     # 连续写入：轮转应稳定在 BACKUP_KEEP 份
+    server.update_local("备份岗", {"status": "已投递" if i % 2 else "待投递"})
+bdir27 = TMP / "local" / "backups"
+snaps = sorted(bdir27.glob("status-*.json"))
+check(len(snaps) == server.BACKUP_KEEP, f"连续写入后备份恰好保留最近 {server.BACKUP_KEEP} 份")
+newest = json.loads(snaps[-1].read_text(encoding="utf-8"))
+check(newest.get("备份岗", {}).get("status") in ("已投递", "待投递"),
+      "最新一份快照是写入前的完整状态（可恢复）")
+shutil.copy2(snaps[-1], TMP / "local" / "status.json")   # 恢复演练：快照改名即回到过去
+restored = json.loads((TMP / "local" / "status.json").read_text(encoding="utf-8"))
+check(restored["备份岗"]["status"] == newest["备份岗"]["status"], "快照可直接恢复")
+# 备份目录不可用时（用同名文件挡住）主写仍要成功
+bdir27.rename(TMP / "local" / "backups.bak")
+(bdir27).write_text("挡路", encoding="utf-8")
+j27 = add(company="备份公司", position="备份岗位")   # 状态端点要求岗位真实存在
+code = req("POST", "/api/jobs/" + U(j27) + "/status", {"status": "面试"})[0]
+check(code == 200, "备份失败不阻塞主写（主写成功才是硬要求）")
+(bdir27).unlink()
+(TMP / "local" / "backups.bak").rename(bdir27)
 
 SRV.shutdown()
 shutil.rmtree(TMP, ignore_errors=True)

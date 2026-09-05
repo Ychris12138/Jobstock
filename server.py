@@ -24,6 +24,7 @@ import hashlib
 import json
 import os
 import re
+import shutil
 import sqlite3
 import subprocess
 import sys
@@ -31,7 +32,7 @@ import threading
 import traceback
 import unicodedata
 import urllib.parse
-from datetime import datetime
+from datetime import datetime, timedelta as _timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -654,6 +655,38 @@ def load_local():
         return {}
 
 
+BACKUP_KEEP = 10          # local/backups/ 里保留的最近快照份数
+
+
+def write_local(table):
+    """个人状态表落盘，写前把旧文件快照进 local/backups/（保留最近 BACKUP_KEEP 份）。
+
+    个人层不进 git，sqlite 也不覆盖它 —— 这是全系统唯一没有安全网的不可再生数据
+    （jobs 进 git 可回滚，jobs.db 可 DROP 重建）。误删、磁盘故障、手改写坏，靠的
+    就是这里的写前快照。快照任何一步失败只告警，绝不阻塞主写：备份是保险丝，
+    主写失败才是真事故。
+    """
+    p = local_path()
+    try:
+        if p.exists():
+            bdir = LOCAL_DIR / "backups"
+            bdir.mkdir(parents=True, exist_ok=True)
+            # 文件名带微秒：字典序 = 时间序，轮转的「删最旧」和恢复的「取最新」
+            # 才都成立。同名（同一微秒）就 +1µs 避让，绝不覆盖上一份快照
+            n = datetime.now()
+            dst = bdir / f"status-{n.strftime('%Y%m%d-%H%M%S-%f')}.json"
+            while dst.exists():
+                n += _timedelta(microseconds=1)
+                dst = bdir / f"status-{n.strftime('%Y%m%d-%H%M%S-%f')}.json"
+            shutil.copy2(p, dst)
+            olds = sorted(bdir.glob("status-*.json"))
+            for old in olds[:-BACKUP_KEEP]:
+                old.unlink(missing_ok=True)
+    except OSError as e:
+        print(f"⚠️ 个人状态备份失败（本次写入照常进行）：{e}", file=sys.stderr)
+    write_json_atomic(p, table)
+
+
 def clean_history(rec):
     """取出记录里合法的时间线条目。手改坏一条不该让整个接口炸掉。"""
     return [h for h in (rec.get("history") or [])
@@ -688,7 +721,7 @@ def update_local(job_id, patch):
             rec["history"] = (clean_history(rec) + [{"status": new, "at": now()}])[-HISTORY_MAX:]
         rec["updated_at"] = now()
         table[job_id] = rec
-        write_json_atomic(local_path(), table)
+        write_local(table)
         return rec
 
 
@@ -713,7 +746,7 @@ def migrate_local():
             rec["history"] = [{"status": st, "at": norm_text(rec.get("updated_at")) or now()}]
             seeded += 1
         if seeded:
-            write_json_atomic(local_path(), table)
+            write_local(table)
     return seeded
 
 
@@ -808,7 +841,7 @@ def migrate():
             write_json_atomic(f, ordered_job(job))
             moved.append(jid)
         if local_dirty:
-            write_json_atomic(local_path(), table)
+            write_local(table)
     migrate_local()      # 注意：在 with 块之外，flock 不可重入
     return moved
 
@@ -839,7 +872,7 @@ def rename_job(old_id, new_id):
         table = read_local_strict()
         if old_id in table:
             table[new_id] = {**table.get(new_id, {}), **table.pop(old_id)}
-            write_json_atomic(local_path(), table)
+            write_local(table)
     try:
         # JSONL 追加而不是整只 JSON 数组：两台机器并发追加时 git 按行合并干净
         with open(JOBS_DIR / ".id-migrations", "a", encoding="utf-8") as f:
@@ -902,7 +935,7 @@ def apply_id_migrations():
             table[new] = {**table.get(new, {}), **table.pop(old)}
             dirty = True
         if dirty:
-            write_json_atomic(local_path(), table)
+            write_local(table)
     return warnings
 
 
@@ -1058,7 +1091,7 @@ def merge_group(ids):
             p = job_path(j["id"])
             if p:
                 p.unlink(missing_ok=True)
-        write_json_atomic(local_path(), table)
+        write_local(table)
         save_job(merged)
     return keep["id"], [j["id"] for j in others], conflicts
 
