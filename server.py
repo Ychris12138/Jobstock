@@ -2184,6 +2184,11 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def main():
+    # 非 UTF-8 locale 的 Windows 重定向输出时，启动横幅里的 emoji/中文会炸。
+    # reconfigure 只在新式 TextIOWrapper 上存在，老式包装（如某些 IDE）没有就跳过
+    for s in (sys.stdout, sys.stderr):
+        if hasattr(s, "reconfigure"):
+            s.reconfigure(encoding="utf-8", errors="replace")
     ap = argparse.ArgumentParser(description="job-stock 服务器")
     ap.add_argument("--port", type=int, default=8770)
     ap.add_argument("--data-dir", help="数据目录（内含 jobs/ local/ data/），覆盖 config.json")

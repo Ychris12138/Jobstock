@@ -16,6 +16,7 @@ import json
 import os
 import shutil
 import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -26,6 +27,12 @@ from http.server import ThreadingHTTPServer
 from pathlib import Path
 
 import server
+
+# 非 UTF-8 locale 的 Windows（如英文版 cp1252）重定向输出时，打印【⏰ 等字符
+# 会直接 UnicodeEncodeError 崩掉，CI 的 windows runner 就是这样红的。
+for _s in (sys.stdout, sys.stderr):
+    if hasattr(_s, "reconfigure"):
+        _s.reconfigure(encoding="utf-8", errors="replace")
 
 PASSED, FAILED = 0, 0
 

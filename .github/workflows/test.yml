@@ -15,6 +15,8 @@ jobs:
       matrix:
         os: [ubuntu-latest, windows-latest]
     runs-on: ${{ matrix.os }}
+    env:
+      PYTHONUTF8: "1"     # windows runner 默认 cp1252，双保险（代码里已 reconfigure）
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
