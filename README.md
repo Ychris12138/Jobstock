@@ -20,7 +20,7 @@ cv/                CV 原文 + <名字>.reading.md 解读文件（格式见 cv/R
 | | 共享（进 git） | 个人（不进 git） |
 |---|---|---|
 | 字段 | `company / position / job_no / category / recruit_type / url / locations[] / salary / source / deadline / tags[] / notes / jd / closed / created_by / updated_by` | `status / my_notes / history[]` |
-| 含义 | 客观招聘信息 + 对大家都有用的公共备注（如「内推码到 9 月底」「卡 985」）；`created_by`/`updated_by` 是录入人/最后编辑人，**服务端自动注入**（config.json 的 `my_name`，回退 git 用户名），录入时不用管 | 我投到哪一步了、我自己的记录、每次状态变更的时间点 |
+| 含义 | 客观招聘信息 + 对大家都有用的公共备注（如「内推码到 9 月底」「卡 985」）；`created_by`/`updated_by` 是录入人/最后编辑人，**服务端自动注入**（config.json 的 `my_name`，回退 git 用户名），录入时不用管。**不想署名就把 `my_name` 留空**——注意仓库是公开的，署名会随 git 历史公开 | 我投到哪一步了、我自己的记录、每次状态变更的时间点 |
 | 谁能看到 | 所有合作者 | 只有本机 |
 
 三个维度各管各的，**不要混进 tags** —— 「上海」「校招」「AI4S」不是同一类东西，

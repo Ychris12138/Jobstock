@@ -1144,6 +1144,11 @@ check(server.fuzzy_key("Schrödinger") == server.fuzzy_key("Schrodinger"), "fuzz
 check(server.canonical_id({"company": "Schrödinger", "position": "X"})
       == server.canonical_id({"company": "Schrodinger", "position": "X"}),
       "变音符公司算出同一个 id，重复拦得住")
+check(server.norm_url("https://x.example.com:abc/path") ==
+      "https://x.example.com:abc/path", "非法端口的 URL 不炸 norm_url（按原样返回）")
+code, _ = req("POST", "/api/jobs", {"company": "坏端口公司", "position": "坏端口岗",
+                                    "url": "https://x.example.com:abc/path"})
+check(code == 200, "非法端口 URL 的录入走正常流程而不是 500")
 
 # ---- 27. 个人层滚动备份 ----------------------------------------------------------
 print("\n【27】个人层滚动备份")

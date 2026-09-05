@@ -549,9 +549,13 @@ def norm_url(u):
     host = (sp.hostname or "").lower()
     if not host:
         return u          # 不是标准链接就不比了
+    try:
+        port = sp.port    # 非法端口（如 :abc）在这里抛 ValueError，按「不比」处理
+    except ValueError:
+        return u
     qs = [(k, v) for k, v in urllib.parse.parse_qsl(sp.query, keep_blank_values=True)
           if k.lower() not in TRACK_PARAMS and not k.lower().startswith("utm_")]
-    netloc = host if not sp.port else f"{host}:{sp.port}"
+    netloc = host if not port else f"{host}:{port}"
     return urllib.parse.urlunsplit((sp.scheme.lower(), netloc, sp.path.rstrip("/") or "/",
                                     urllib.parse.urlencode(qs), ""))
 
