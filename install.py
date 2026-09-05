@@ -62,11 +62,18 @@ def main():
         if cv_dir is None:
             cur = old.get("cv_dir")
             cv_dir = ask(f"CV 目录（回车 = {cur or '仓库内 cv/'}）：") or cur
+        cur_name = old.get("my_name", "")
+        name = ask(f"你的名字（写入新岗位的 created_by，队友就知道谁录的；回车 = "
+                   f"{cur_name or '跳过，运行时用 git 用户名'}）：")
+        if name:
+            old["my_name"] = name
     else:
         data_dir = data_dir or old.get("data_dir")
         cv_dir = cv_dir or old.get("cv_dir")
 
     cfg = {}
+    if old.get("my_name"):
+        cfg["my_name"] = old["my_name"]
     if data_dir:
         cfg["data_dir"] = data_dir
     if cv_dir:

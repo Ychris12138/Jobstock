@@ -41,6 +41,34 @@ CONFIG_PATH = ROOT / "config.json"
 WEB_DIR = ROOT / "web"
 SERVER_VERSION = "0.3.0"   # 随功能性改动一起更新；前端用它检测「网页新、后台旧」
 
+_my_name_cache = {"n": None, "done": False}
+
+
+def my_name():
+    """本机身份：config.json 的 my_name，回退 git config user.name；都没有返回空串。
+
+    只用于 created_by / updated_by 的自动注入。缓存一次结果 —— 每次保存都去
+    跑一条 git 子进程没必要。
+    """
+    if _my_name_cache["done"]:
+        return _my_name_cache["n"]
+    n = ""
+    if CONFIG_PATH.exists():
+        try:
+            n = norm_text(json.loads(CONFIG_PATH.read_text(encoding="utf-8")).get("my_name"))
+        except Exception:
+            n = ""
+    if not n:
+        try:
+            p = subprocess.run(["git", "config", "user.name"], cwd=ROOT,
+                               capture_output=True, text=True, timeout=10)
+            if p.returncode == 0:
+                n = norm_text(p.stdout)
+        except Exception:
+            n = ""
+    _my_name_cache["n"], _my_name_cache["done"] = n, True
+    return n
+
 # 数据位置：默认都在仓库内；可用 config.json 或 CLI 参数 --data-dir / --cv-dir 覆盖。
 JOBS_DIR = ROOT / "jobs"
 LOCAL_DIR = ROOT / "local"
@@ -232,8 +260,11 @@ KNOWN_CITIES = ["北京", "上海", "深圳", "杭州", "广州", "成都", "南
 
 # 共享字段 —— 写进 jobs/<id>.json，随 git 同步给所有人
 # locations 是数组：一个岗位常常多地可选，塞进单值字段会丢信息
+# created_by / updated_by 由服务端在写入时自动注入（config.json 的 my_name，
+# 回退 git config user.name），agent 与手写 JSON 都不需要填
 SHARED_FIELDS = ["company", "position", "job_no", "category", "recruit_type", "url",
-                 "locations", "salary", "source", "deadline", "tags", "notes", "jd", "closed"]
+                 "locations", "salary", "source", "deadline", "tags", "notes", "jd", "closed",
+                 "created_by", "updated_by"]
 # 布尔字段。closed = 岗位已下架/关闭，属于共享信息：一个人发现投递入口没了，
 # 其他人就不必再点进去确认一次。它和「已归档」不是一回事 —— 归档是个人层的
 # 「我不投了」，下架是客观事实。
@@ -246,12 +277,14 @@ JSON_ORDER = ["id"] + SHARED_FIELDS + ["created_at", "updated_at"]
 # sqlite 索引表的列。改这里不需要迁移脚本 —— reindex 会 DROP 重建整张表。
 INDEX_COLUMNS = ["id", "company", "position", "job_no", "category", "recruit_type", "locations",
                  "salary", "source", "url", "deadline", "tags", "notes", "jd", "closed",
+                 "created_by", "updated_by",
                  "status", "my_notes", "status_updated_at", "applied_at",
                  "match_hits", "match_kw", "updated_at", "created_at"]
 # 列表接口返回的列：不含 jd/notes 这类大字段，它们只参与关键词搜索。
 # url 要返回 —— 列表里的公司名是可以直接点开岗位页的外链。
 LIST_COLUMNS = ["id", "company", "position", "job_no", "category", "recruit_type", "locations",
                 "salary", "source", "url", "status", "deadline", "tags", "my_notes", "closed",
+                "created_by", "updated_by",
                 "status_updated_at", "applied_at", "match_hits", "match_kw",
                 "updated_at", "created_at"]
 # 单值维度：精确等值筛选（同一维度内多值取 OR）
@@ -1033,6 +1066,15 @@ def merge_two_jobs(a, b):
         elif k in ("notes", "jd"):
             if not is_empty(bv) and norm_text(bv) not in norm_text(merged.get(k)):
                 merged[k] = f"{merged.get(k) or ''}\n───\n{bv}".strip()
+        elif k == "created_by":
+            # 谁先录的就记谁：按 created_at 取更早的那位，而不是机械地保留幸存者的
+            if not is_empty(bv) and norm_text(bv) != norm_text(merged.get(k)) \
+                    and norm_text(b.get("created_at") or "9999") < norm_text(merged.get("created_at") or "9999"):
+                merged[k] = bv
+        elif k == "updated_by":
+            if not is_empty(bv) and norm_text(bv) != norm_text(merged.get(k)) \
+                    and norm_text(b.get("updated_at") or "") > norm_text(merged.get("updated_at") or ""):
+                merged[k] = bv
         elif not is_empty(bv) and norm_text(bv) != norm_text(merged.get(k)):
             conflicts.append({"id": b.get("id"), "field": k,
                               "value": bv if isinstance(bv, str)
@@ -2060,6 +2102,10 @@ class Handler(BaseHTTPRequestHandler):
                             job[k] = True
                         continue
                     job[k] = data[k]
+                mn = my_name()
+                if mn:
+                    job["created_by"] = mn
+                    job["updated_by"] = mn
                 save_job(job)
             # 落盘要用归一值：校验走的是 norm_text，落盘若用原值，" 已归档 " 这种
             # 带空格的状态会造出一条既藏不掉也筛不出来的岗位
@@ -2121,6 +2167,9 @@ class Handler(BaseHTTPRequestHandler):
             if touched:
                 job.update(touched)
                 job["updated_at"] = now()
+                mn = my_name()
+                if mn:
+                    job["updated_by"] = mn
                 save_job(job)
 
         patch = {}

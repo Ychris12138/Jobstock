@@ -45,6 +45,8 @@
       "type": "boolean",
       "description": "岗位已下架/关闭（客观事实，共享层）。为假时整个字段不落盘。手写时 true / \"1\" / \"是\" / \"已下架\" 都认。与「已归档」（个人选择）不是一回事。"
     },
+    "created_by": { "type": "string", "description": "录入人。服务端在新增时自动注入（config.json 的 my_name，回退 git config user.name），agent 与手写 JSON 不需要填。" },
+    "updated_by": { "type": "string", "description": "最后编辑人。服务端在共享字段变化时自动刷新。" },
     "created_at": { "type": "string", "pattern": "^\\d{4}-\\d{2}-\\d{2} \\d{2}:\\d{2}$" },
     "updated_at": { "type": "string", "pattern": "^\\d{4}-\\d{2}-\\d{2} \\d{2}:\\d{2}$" }
   },

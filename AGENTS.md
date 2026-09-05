@@ -16,7 +16,8 @@ cv/                CV 与解读文件 —— 不进 git（个人信息），只�
 
 **agent 写岗位数据时只碰共享层的字段**（见 `schema/job.schema.json`）：
 `company / position / job_no / category / recruit_type / url / locations[] / salary /
-source / deadline / tags[] / notes / jd / closed`。
+source / deadline / tags[] / notes / jd / closed`（`created_by` / `updated_by` 由
+server 在写入时自动注入，不用手写）。
 **不要写 `status` / `my_notes` / `history`** —— 它们是个人层，写进共享 JSON 会在
 启动时被自动搬走，还会产生本不该存在的 git diff。
 

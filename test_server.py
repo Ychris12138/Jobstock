@@ -1180,6 +1180,54 @@ check(code == 415, "非 JSON 的 Content-Type 被拒绝")
 code, d = raw_http("POST", "/api/sync", {"Host": f"127.0.0.1:{PORT}"})   # 无 body 无 CT
 check(code == 200, "无 body 的 curl 式 POST 不受影响（AGENTS.md 的用法保持可用）")
 
+# ---- 29. 贡献者字段 created_by / updated_by --------------------------------------
+print("\n【29】贡献者字段 created_by / updated_by")
+orig_name = server.my_name
+server.my_name = lambda: "测试员"
+cb29 = add(company="署名公司", position="署名岗位", salary="10K")
+saved29 = json.loads((TMP / "jobs" / f"{cb29}.json").read_text(encoding="utf-8"))
+check(saved29.get("created_by") == "测试员" and saved29.get("updated_by") == "测试员",
+      "新增时自动注入 created_by / updated_by（无需任何人手写）")
+_, j29 = req("GET", "/api/jobs/" + U(cb29))
+code, _ = req("PUT", "/api/jobs/" + U(cb29), frontend_body(j29, salary="20K"))
+saved29b = json.loads((TMP / "jobs" / f"{cb29}.json").read_text(encoding="utf-8"))
+check(saved29b.get("salary") == "20K" and saved29b.get("updated_by") == "测试员",
+      "本机编辑后 updated_by 保持本机身份")
+server.my_name = lambda: "同事乙"
+_, j29b = req("GET", "/api/jobs/" + U(cb29))
+code, _ = req("PUT", "/api/jobs/" + U(cb29), frontend_body(j29b, salary="30K"))
+saved29c = json.loads((TMP / "jobs" / f"{cb29}.json").read_text(encoding="utf-8"))
+check(saved29c.get("updated_by") == "同事乙" and saved29c.get("created_by") == "测试员",
+      "编辑时 updated_by 刷新为当前身份，created_by 保持录入人")
+sig29 = (TMP / "jobs" / f"{cb29}.json").read_bytes()
+server.my_name = lambda: "同事丙"
+_, j29d = req("GET", "/api/jobs/" + U(cb29))
+code, d = req("PUT", "/api/jobs/" + U(cb29), frontend_body(j29d))
+check(d.get("shared_changed") is False and (TMP / "jobs" / f"{cb29}.json").read_bytes() == sig29,
+      "no-op 保存不刷新 updated_by、不产生 diff")
+server.my_name = lambda: ""
+nc29 = add(company="无名公司", position="无名岗位")
+saved29e = json.loads((TMP / "jobs" / f"{nc29}.json").read_text(encoding="utf-8"))
+check("created_by" not in saved29e and "updated_by" not in saved29e,
+      "本机没有任何身份信息时不写字段（不落空串）")
+server.my_name = orig_name
+# 合并：created_by 取 created_at 更早的录入人，而不是机械保留幸存者的
+write_raw("署名甲.json", {"id": "署名甲", "company": "署名冲突公司", "position": "署名岗位",
+                        "job_no": "S001", "created_by": "甲", "updated_by": "甲",
+                        "tags": [], "created_at": "2026-01-01 10:00", "updated_at": "2026-01-01 10:00"})
+write_raw("署名乙.json", {"id": "署名乙", "company": "署名冲突公司", "position": "署名岗位",
+                        "job_no": "S001", "salary": "9K", "created_by": "乙", "updated_by": "乙",
+                        "tags": [], "created_at": "2026-02-01 10:00", "updated_at": "2026-02-01 10:00"})
+req("POST", "/api/reindex")
+code, dd29 = req("POST", "/api/dedupe")
+# 字典序在前的署名乙会被 migrate_ids 先升级成规范 id，dropped 里是升级后的 id
+m29 = [m for m in dd29["merged"] if "S001" in m["reason"]]
+# 乙多写了 salary → 信息更全成为幸存者；但 created_by 必须仍归先录入的甲
+check(bool(m29) and m29[0]["keep"] != "署名甲", "信息更全的后录者成为幸存者")
+
+_, kept29 = req("GET", "/api/jobs/" + U(m29[0]["keep"]))
+check(kept29.get("created_by") == "甲", "合并后 created_by 取先录入的人（而非机械保留幸存者的）")
+
 SRV.shutdown()
 shutil.rmtree(TMP, ignore_errors=True)
 print(f"\n{'='*46}\n通过 {PASSED} 项，失败 {FAILED} 项\n{'='*46}")

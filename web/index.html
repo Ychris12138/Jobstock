@@ -575,7 +575,7 @@ async function loadJobs() {
       <td><span class="badge st-${esc(j.status)}">${esc(j.status)}</span>
         ${j.status_updated_at ? `<span class="sub-time">${esc(j.status_updated_at.slice(5))}</span>` : ''}</td>
       <td>${dlCell(j)}</td>
-      <td class="muted">${esc((j.updated_at || '').slice(5))}</td>
+      <td class="muted"${j.updated_by ? ` title="由 ${esc(j.updated_by)} 最后更新"` : ''}>${esc((j.updated_at || '').slice(5))}</td>
       <td onclick="event.stopPropagation()">
         <select onchange="quickStatus('${encodeURIComponent(j.id)}', this.value)">
           <option value="">改状态…</option>
