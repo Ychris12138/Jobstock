@@ -60,37 +60,29 @@ python install.py
 
 ## 🤖 让 Agent 帮你安装（推荐）
 
-如果你已经在用 Claude Code、Codex、Cursor 或其他 Coding Agent，可以直接把下面这段发给它：
+如果你已经在用 Claude Code、Codex、Cursor 或其他 Coding Agent，直接把下面这段发给它即可：
 
 ```text
 请帮我安装并初始化 Jobstock：
 https://github.com/Ychris12138/Jobstock
 
-要求：
-1. clone 到合适的本地目录；
-2. 先阅读 README.md 和 AGENTS.md；
-3. 使用默认配置完成安装；
-4. 运行 test_server.py，确认测试通过；
-5. 启动本地 WebUI；
-6. 不上传、提交或同步我的 CV、岗位数据、投递状态和 config.json；
-7. 完成后告诉我本地目录和以后怎么启动。
+安装策略：
+1. 先检测本机是否有 Git；
+2. 如果 Git 可用且可以正常访问 GitHub，就 git clone 仓库；
+3. 如果没有 Git，或 clone 失败，就下载：
+   https://github.com/Ychris12138/Jobstock/archive/refs/heads/main.zip
+   解压后进入项目目录；
+4. 阅读 README.md 和 AGENTS.md；
+5. 使用默认配置运行 install.py --yes；
+6. 运行 test_server.py，确认测试通过；
+7. 启动本地 WebUI；
+8. 不上传、提交或同步我的 CV、岗位数据、投递状态和 config.json；
+9. 完成后告诉我安装目录和以后怎么启动。
 ```
 
-### Agent 快捷路径
+**Agent 只需要记住一条安装逻辑：Git 能用就 clone，不能用就下载 ZIP。** 不需要为了安装 Jobstock 额外配置 Git。
 
-macOS / Linux：
-
-```bash
-git clone https://github.com/Ychris12138/Jobstock.git && cd Jobstock && python3 install.py --yes && python3 test_server.py && python3 server.py
-```
-
-Windows（已有 `git` 和 `python`）：
-
-```bash
-git clone https://github.com/Ychris12138/Jobstock.git && cd Jobstock && python install.py --yes && python test_server.py && python server.py
-```
-
-> Agent 进入仓库后应先读 [`AGENTS.md`](AGENTS.md)。那里写清楚了哪些岗位数据可以批量维护、哪些个人数据不要碰。
+> Jobstock 本身不会上传你的 CV 或求职数据；如果让外部 Agent 阅读 CV，数据处理方式取决于你所使用的 Agent / 模型服务。
 
 ---
 
