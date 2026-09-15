@@ -245,6 +245,7 @@ python test_server.py
 
 ## 当前版本
 
-**v0.0.1**
+**v0.1.0**
 
-Jobstock 仍处于早期版本。如果你遇到安装、数据迁移、岗位格式或 Agent 协作问题，欢迎提交 Issue。
+Jobstock 仍处于早期版本。WebUI 顶栏有「使用指南」页（三步上手、Agent 提示词、分类定制）。
+如果你遇到安装、数据迁移、岗位格式或 Agent 协作问题，欢迎提交 Issue。
