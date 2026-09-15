@@ -41,7 +41,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent
 CONFIG_PATH = ROOT / "config.json"
 WEB_DIR = ROOT / "web"
-SERVER_VERSION = "0.1.1"   # 随功能性改动一起更新；前端用它检测「网页新、后台旧」
+SERVER_VERSION = "0.1.0"   # 随功能性改动一起更新；前端用它检测「网页新、后台旧」
 
 _my_name_cache = {"n": None, "done": False}
 

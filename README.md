@@ -30,7 +30,7 @@
 
 ### Windows 用户（推荐）
 
-下载 [Releases](https://github.com/Ychris12138/Jobstock/releases) 页面最新的 `Jobstock-v*-Windows-x64.zip`，解压后双击 `Jobstock.bat`。
+下载 `Jobstock-v0.1.0-Windows-x64.zip`（[Releases](https://github.com/Ychris12138/Jobstock/releases) 页面），解压后双击 `Jobstock.bat`。
 
 无需安装 Python、Git、npm 或其他依赖（包内已内置 Python 运行环境）；不写 PATH、不写注册表、不需要管理员权限。首次双击会做一次性初始化（一路回车即可），之后浏览器自动打开。
 
@@ -263,7 +263,7 @@ python test_server.py
 
 ## 当前版本
 
-**v0.1.1**
+**v0.1.0**
 
 Jobstock 仍处于早期版本。WebUI 顶栏有「使用指南」页（三步上手、Agent 提示词、分类定制）。
 如果你遇到安装、数据迁移、岗位格式或 Agent 协作问题，欢迎提交 Issue。
