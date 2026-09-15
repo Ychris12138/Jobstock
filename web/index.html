@@ -158,8 +158,6 @@
   .more-dot { display: inline-block; min-width: 17px; height: 17px; line-height: 17px;
               text-align: center; border-radius: 999px; background: var(--accent); color: #fff;
               font-size: 11px; font-weight: 700; margin-left: 5px; }
-  /* 未推送徽标：红色实心 = 有 commit 停在本机、合作者还看不到 */
-  #push-btn.push-hot { background: #e03131; border-color: #e03131; color: #fff; font-weight: 700; }
 
   /* 移动端：网页不开就没有提醒，而查「明天截止什么」恰恰多发生在手机碎片段 */
   .tbl-wrap { overflow-x: auto; }
@@ -210,9 +208,9 @@
       <span class="muted" id="count"></span>
       <span style="flex:1 1 auto"></span>
       <button class="btn ghost small" onclick="reindex()" title="手动改了 jobs/*.json 或 cv/ 里的解读文件后点这里重算">↻ 重建索引</button>
-      <button class="btn ghost small" onclick="syncRepo()" title="git pull --rebase --autostash：只拉取，不推送你自己的改动">⇩ 拉取合作者数据</button>
-      <button class="btn ghost small" id="push-btn" hidden onclick="openPush()"
-              title="把 jobs/ 下的共享招聘数据 commit 并推送给合作者">⇧ 推送</button>
+      <button class="btn ghost small" onclick="dedupe()" title="扫描职位号/链接相同的岗位并合并（被合并的会留历史版本）">🔀 合并重复</button>
+      <a class="btn ghost small" href="/api/backup" style="text-decoration:none"
+         title="把全部岗位（含历史版本）与投递状态打成一个 zip 下载 —— 数据只在本机，记得常备份">⇩ 全量备份</a>
     </div>
     <div class="toolbar" id="more-bar" hidden>
       <select id="f-company" onchange="loadJobs()"><option value="">全部公司</option></select>
@@ -262,10 +260,10 @@
 <dialog id="dlg">
   <h3 id="dlg-title" style="margin-top:0">新增岗位</h3>
   <div class="form-grid">
-    <div class="sec">🌍 招聘信息 <span>— 进 git，合作者都能看到</span></div>
+    <div class="sec">🌍 招聘信息 <span>— 存在本机 jobs/，每次保存自动留 3 份历史版本</span></div>
     <label>公司 *</label><input id="e-company" list="dl-company" placeholder="可选择已有，也可直接输入新公司">
     <label>岗位 *</label><input id="e-position" list="dl-position" placeholder="原始职位名，如：算法工程师(NLP)">
-    <label>职位号</label><input id="e-job_no" placeholder="官方职位编号，如 A212198A —— 填了就不会和别人录重复">
+    <label>职位号</label><input id="e-job_no" placeholder="官方职位编号，如 A212198A —— 填了就不会录重复">
     <label>分类</label><select id="e-category"></select>
     <label>类型</label><select id="e-recruit_type"></select>
     <label>链接</label><input id="e-url" placeholder="投递页 / JD 链接">
@@ -275,19 +273,22 @@
     <label>来源</label><input id="e-source" list="dl-source" placeholder="官网 / 牛客 / 内推…">
     <label>截止</label><input id="e-deadline" type="date">
     <label>标签</label><input id="e-tags" list="dl-tags" placeholder="逗号分隔，如：AI4S, 校招">
-    <label>公共备注</label><textarea id="e-notes" placeholder="对大家都有用的情报，如：内推码有效期到 9 月底、卡 985"></textarea>
+    <label>公共备注</label><textarea id="e-notes" placeholder="对以后的自己有用的情报，如：内推码有效期到 9 月底、卡 985"></textarea>
     <label>JD 快照</label><textarea id="e-jd" style="min-height:130px" placeholder="粘贴 JD 原文，会被关键词搜索命中"></textarea>
     <label>下架</label>
     <label class="check">
       <input type="checkbox" id="e-closed">岗位已下架 / 投递入口关闭
-      <span class="muted" style="margin-left:6px">合作者也会看到，省得再点一次链接确认</span>
+      <span class="muted" style="margin-left:6px">列表里默认收起，免得再点一次链接确认</span>
     </label>
 
-    <div class="sec">🔒 我的进度 <span>— 只存在本机 local/status.json，不进 git</span></div>
+    <div class="sec">🔒 我的进度 <span>— 只存在本机 local/status.json</span></div>
     <label>匹配</label><div id="e-match" class="muted">—</div>
     <label>状态</label><select id="e-status"></select>
     <label>时间线</label><ul class="tl" id="e-timeline"></ul>
     <label>个人备注</label><textarea id="e-my_notes" placeholder="自己的投递记录，如：3.5 投的，等一周没回音"></textarea>
+
+    <div class="sec">🕘 历史版本 <span>— 每次保存前自动留底，最多 3 份，可一键恢复</span></div>
+    <label>版本</label><div id="e-versions" class="muted">—</div>
   </div>
   <div class="dlg-actions">
     <button class="btn ghost" onclick="dlg.close()">取消</button>
@@ -300,23 +301,9 @@
   <datalist id="dl-tags"></datalist>
 </dialog>
 
-<dialog id="push-dlg">
-  <h3 style="margin-top:0">⇧ 提交并推送</h3>
-  <pre class="prompt" id="push-info"></pre>
-  <div class="form-grid" style="margin-top:12px">
-    <label>说明</label>
-    <input id="push-msg" style="grid-column:2"
-           placeholder="commit 说明，留空自动生成（data: WebUI 推送（更新 N、新增 N））">
-  </div>
-  <div class="dlg-actions">
-    <button class="btn ghost" onclick="pushDlg.close()">取消</button>
-    <button class="btn" onclick="doPush()">确认推送</button>
-  </div>
-</dialog>
 
 <script>
 const dlg = document.getElementById('dlg');
-const pushDlg = document.getElementById('push-dlg');
 let STATUSES = [], CATEGORIES = [], RECRUIT_TYPES = [], editingId = null, editingBase = '';
 const selectedTags = new Set();   // 已勾选的标签，多个取 AND
 let loadSeq = 0, searchTimer = null;
@@ -349,7 +336,7 @@ function cityColor(c) {
   return CITY_FALLBACK[h % CITY_FALLBACK.length];
 }
 
-// 只放行 http(s)：url 来自共享 JSON，合作者可写，不能让 javascript: 之类进到 href
+// 只放行 http(s)：url 可能来自手写的 JSON，不能让 javascript: 之类进到 href
 function safeUrl(u) { return /^https?:\/\//i.test(u || '') ? u : ''; }
 
 // 两个 YYYY-MM-DD 相差几天。一律按 UTC 零点算，避免夏令时切换那两天算出 ±1。
@@ -401,7 +388,7 @@ function showTab(t) {
   if (t === 'cv') loadCV();
 }
 
-// 转义 HTML 特殊字符。单引号也要转 —— 状态值可能来自手改的文件或合作者的 JSON
+// 转义 HTML 特殊字符。单引号也要转 —— 状态值可能来自手改的文件
 function esc(s) {
   return (s == null ? '' : String(s)).replace(/[&<>"']/g,
     c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
@@ -628,7 +615,6 @@ async function loadJobs() {
     '官网', '牛客', '内推', 'Boss直聘', '实习僧', '猎头'])]);
   document.getElementById('count').textContent = `共 ${d.jobs.length} 条`;
   checkServerVersion(d.server_version);
-  refreshGitStatus();
 
   document.getElementById('rows').innerHTML = d.jobs.map(j => `
     <tr class="${j.closed ? 'closed' : ''}" onclick="openEdit('${encodeURIComponent(j.id)}')">
@@ -660,11 +646,11 @@ async function loadJobs() {
 
 async function quickStatus(id, status) {
   if (!status) return;
-  await api(`/api/jobs/${id}/status`, {body: {status}});   // 只写本地，不产生 git diff
+  await api(`/api/jobs/${id}/status`, {body: {status}});   // 只写个人状态文件
   loadJobs();
 }
 
-// 把 reindex / sync 报出来的问题显示成常驻提示条，别用 alert 一闪而过
+// 把 reindex 报出来的问题显示成常驻提示条，别用 alert 一闪而过
 function showReport(d, prefix) {
   const lines = [...(d.skipped || []).map(x => '⚠️ 跳过 ' + x),
                  ...(d.warnings || []).map(x => '⚠️ ' + x)];
@@ -702,78 +688,46 @@ async function reindex() {
   loadJobs();
 }
 
-async function syncRepo() {
-  const d = await api('/api/sync', {body: {}});
-  if (!d.ok) {
-    if (d.conflict) { renderConflict(d); alert('同步遇到冲突，按页面顶部提示处理，不用去终端。'); return; }
-    notice('⚠️ 同步失败：\n' + esc(d.message)); alert('同步失败，详情见页面顶部提示。'); return;
-  }
-  showReport(d, `已拉取合作者数据：${d.count} 条岗位`);
-  // 变更摘要：只弹一句「拉取成功」的话，没人知道合作者到底改了什么——
-  // 尤其「别人下架了你还在推进的岗位」，必须红字示警而不是让它从列表里静默消失。
-  const ch = d.changes;
-  if (ch) {
-    const fmt = x => `${esc(x.company)} ${esc(x.position)}`;
-    const doing = ['已投递', '笔试', '面试'];
-    let html = '';
-    if (ch.new.length) html += `🆕 合作者新增 ${ch.new.length} 条：` + ch.new.map(fmt).join('；') + '\n';
-    if (ch.updated.length) html += `✏️ 更新 ${ch.updated.length} 条：` + ch.updated.map(fmt).join('；') + '\n';
-    if (ch.closed.length) {
-      html += `🚫 被标记下架 ${ch.closed.length} 条：` + ch.closed.map(x => {
-        const mine = doing.includes(x.my_status);
-        return (mine ? '<b style="color:#e03131">' : '') + fmt(x)
-          + (x.my_status && x.my_status !== '待投递' ? `（你的状态：${esc(x.my_status)}）` : '')
-          + (mine ? '</b>' : '');
-      }).join('；') + '\n';
-      if (ch.closed.some(x => doing.includes(x.my_status)))
-        html += '🔴 红色的岗位你还在推进 —— 点开确认一下，别按旧 JD 准备到最后一刻。\n';
-    }
-    notice(html || '');
-  }
-  alert(`已拉取合作者数据，现共 ${d.count} 条岗位。` +
-        (ch && (ch.new.length + ch.updated.length + ch.closed.length)
-          ? `\n变更摘要见页面顶部提示。` : ''));
+// ── 历史版本：每次保存前服务端自动把旧内容存进 jobs/.history/<id>/（最多 3 份）。
+// 这里负责展示与恢复 —— 改坏了、误合并了，都能退回去。
+async function renderVersions(id) {
+  const box = document.getElementById('e-versions');
+  if (!id) { box.textContent = '—'; return; }
+  let d;
+  try { d = await fetch(`/api/jobs/${encodeURIComponent(id)}/versions`).then(r => r.json()); }
+  catch (e) { box.textContent = '（拿不到历史版本，后台 server.py 可能还是旧版）'; return; }
+  const vs = d.versions || [];
+  if (!vs.length) { box.textContent = '还没有历史 —— 保存过一次修改后，旧内容会自动留底。'; return; }
+  box.innerHTML = vs.map((v, i) =>
+    `<div style="margin:3px 0">${esc(v.at)} <span class="muted">（${(v.size / 1024).toFixed(1)} KB）</span> `
+    + `<button class="btn small ghost" onclick="viewVersion('${encodeURIComponent(id)}','${v.file}',this)">查看</button> `
+    + `<button class="btn small" onclick="restoreVersion('${encodeURIComponent(id)}','${v.file}')">恢复成此版本</button>`
+    + (i === 0 ? ' <span class="muted">← 最近一次保存前的内容</span>' : '')
+    + `</div>`).join('')
+    + `<div id="e-version-view" class="muted" style="margin-top:6px"></div>`;
+}
+
+async function viewVersion(idEnc, file, btn) {
+  const d = await api(`/api/jobs/${idEnc}/versions/${file}`);
+  const box = document.getElementById('e-version-view');
+  const brief = `公司：${d.company || ''}  岗位：${d.position || ''}  薪资：${d.salary || ''}`
+    + `  截止：${d.deadline || ''}\n标签：${(d.tags || []).join('、')}  地点：${(d.locations || []).join('、')}`
+    + (d.notes ? `\n备注：${d.notes}` : '');
+  box.innerHTML = `<pre class="prompt" style="margin:4px 0">${esc(brief)}</pre>`;
+}
+
+async function restoreVersion(idEnc, file) {
+  const id = decodeURIComponent(idEnc);
+  if (!confirm('把这条岗位恢复成选中的历史版本？\n（当前内容会先自动留一份新历史，不会丢）')) return;
+  await api(`/api/jobs/${idEnc}/versions/${file}/restore`, {body: {}});
+  alert('已恢复。');
+  openEdit(id);      // 重新拉取恢复后的内容填进表单
   loadJobs();
-}
-
-// ── 冲突自助：以前冲突只有一句「请到终端处理」，不会 git 的成员只能弃疗，
-// 且冲突 commit 不清掉的话同步按钮从此永久瘫痪。现在页面上三选一，
-// 全部处理完自动继续。注意「我的/对方的」由后端按 stage 号取内容，
-// 避开 --ours/--theirs 在 rebase 场景里的语义反转。
-let CONFLICT_PHASE = 'stash';
-
-function renderConflict(d) {
-  if (d.phase) CONFLICT_PHASE = d.phase;
-  const files = d.files || [];
-  const btns = files.map(f =>
-    `<div style="margin:8px 0 2px"><b>${esc(f)}</b><br>`
-    + `<button class="btn small" onclick="resolveConflict('${encodeURIComponent(f)}','mine')">保留我的</button> `
-    + `<button class="btn small" onclick="resolveConflict('${encodeURIComponent(f)}','theirs')">保留对方的</button> `
-    + `<button class="btn small" onclick="resolveConflict('${encodeURIComponent(f)}','both')">两边拼接</button></div>`)
-    .join('');
-  notice(`⚔️ 同步遇到冲突 —— 你的改动和合作者的改动碰了同一个岗位的同一处。\n`
-    + `每个文件选一个处理方式（「我的」= 本机的改动，「对方的」= 合作者推上来的）：\n${btns}`
-    + (CONFLICT_PHASE === 'stash'
-        ? '\n\n提示：你的原始改动安全地存在 git stash 里，全部处理完会自动清理。' : ''));
-}
-
-async function resolveConflict(fileEnc, action) {
-  const d = await api('/api/conflict/resolve',
-                      {body: {file: decodeURIComponent(fileEnc), action}});
-  if (!d.ok) { notice('⚠️ 冲突处理失败：\n' + esc(d.message)); return; }
-  if (d.finished) {
-    notice(d.note ? `✅ 冲突全部处理完${esc(d.note)}，索引已重建（${d.count} 条岗位）。`
-                  : `✅ 冲突全部处理完，索引已重建（${d.count} 条岗位）。`);
-    loadJobs();
-  } else {
-    renderConflict({files: d.remaining});
-  }
 }
 
 const SHARED_INPUTS = ['company','position','job_no','url','salary','source','deadline','notes','jd'];
 
-// ── 推送：同步只拉不推，这里是另一半。未推送的 commit 停在本机 = 你录的
-// 数据合作者看不到，这个数字必须常驻可见，不能等人想起来去敲 git。
+// 后台 server.py 升级过的话提示重启 —— 前后端版本不一致时新功能会静默缺失
 function checkServerVersion(v) {
   if (!v) return;                       // 旧版 server 没有这个字段，跳过
   const old = localStorage.getItem('js_ver');
@@ -783,55 +737,8 @@ function checkServerVersion(v) {
   localStorage.setItem('js_ver', v);
 }
 
-async function refreshGitStatus() {
-  const btn = document.getElementById('push-btn');
-  let d;
-  try { d = await fetch('/api/git_status').then(r => r.json()); }
-  catch (e) { btn.hidden = true; return; }    // 旧版 server 没有这个接口
-  if (!d.in_repo) { btn.hidden = true; return; }
-  const ahead = d.ahead || 0;
-  const dirty = d.dirty.modified.length + d.dirty.untracked.length;
-  btn.hidden = false;
-  btn.classList.toggle('push-hot', ahead > 0);
-  btn.textContent = ahead ? `⇧ 未推送 ${ahead}` : (dirty ? '⇧ 待提交' : '⇧ 已同步');
-  btn.title = ahead ? `${ahead} 个 commit 停在本机，合作者还看不到` : '把 jobs/ 下的改动推送给合作者';
-}
-
-async function openPush() {
-  let d;
-  try { d = await fetch('/api/git_status?fetch=1').then(r => r.json()); }
-  catch (e) { alert('拿不到仓库状态：' + e.message); return; }
-  if (!d.in_repo) { alert(d.message || '数据目录不在 git 仓库里，无法推送。'); return; }
-  const lines = [];
-  if (d.unpushed_commits.length)
-    lines.push('已 commit 未推送：\n  ' + d.unpushed_commits.join('\n  '));
-  if (d.dirty.modified.length)
-    lines.push('待提交（修改）：\n  ' + d.dirty.modified.join('\n  '));
-  if (d.dirty.untracked.length)
-    lines.push('待提交（新文件）：\n  ' + d.dirty.untracked.join('\n  '));
-  if (d.behind)
-    lines.push(`⚠️ 远端比本地新 ${d.behind} 个 commit，推送时会先自动拉平（遇冲突会在页面上引导处理）。`);
-  if (!lines.length) { alert('没有可推送的改动。'); return; }
-  document.getElementById('push-info').textContent =
-    '只推送 jobs/ 下的共享招聘数据（个人进度与 CV 永远不推）。\n\n' + lines.join('\n\n');
-  document.getElementById('push-msg').value = '';
-  pushDlg.showModal();
-}
-
-async function doPush() {
-  const d = await api('/api/push', {body: {message: document.getElementById('push-msg').value}});
-  pushDlg.close();
-  if (!d.ok) {
-    notice('⚠️ 推送失败：\n' + esc(d.message));
-    if (d.conflict) alert('推送时遇到合并冲突，处理方式见页面顶部提示。');
-    return;
-  }
-  alert(d.pushed ? '✅ 已推送给合作者。' : '没有可推送的改动。');
-  loadJobs();
-}
-
 // 让 select 能装下枚举外的存量值：不补这个临时项的话，读回来是空串，
-// 一保存就把合作者写的分类/状态抹掉了
+// 一保存就把手写 JSON 里的分类/状态抹掉了
 function fillSelect(sel, values, current, emptyLabel) {
   const list = [...values];
   const cur = current || '';
@@ -863,6 +770,7 @@ async function openEdit(id) {
   fillSelect(document.getElementById('e-status'), STATUSES, j.status || '待投递', null);
   document.getElementById('e-my_notes').value = j.my_notes || '';
   document.getElementById('e-tags').value = (j.tags || []).join(', ');
+  renderVersions(id);
   dlg.showModal();
 }
 

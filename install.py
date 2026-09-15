@@ -3,12 +3,12 @@
 
 用法：
     python install.py                                   # 交互式（推荐）
-    python install.py --yes                             # 全默认：数据/CV 都放仓库内
+    python install.py --yes                             # 全默认：数据/CV 都放工具目录内
     python install.py --data-dir D:\\jobs-data --cv-dir ~/my-cv
 
 安装做的事：
-    1. 写入 config.json（记录数据目录 / CV 目录，相对路径基于本仓库）
-    2. 创建所需目录（jobs/ 共享招聘信息、local/ 个人状态、data/ 索引、cv/）
+    1. 写入 config.json（记录数据目录 / CV 目录，相对路径基于本工具目录）
+    2. 创建所需目录（jobs/ 岗位信息、local/ 个人状态、data/ 索引、cv/）
     3. 重建 sqlite 索引
     4. macOS 下给 start.command 加执行权限
 """
@@ -43,8 +43,8 @@ def main():
         sys.exit("需要 Python 3.8 或更高版本。")
 
     print("job-stock 安装配置")
-    print("（数据放仓库内可随 git 同步到多台电脑；放仓库外则各机器独立）")
-    print("注意：投递状态存在 <数据目录>/local/ 下，永远不进 git，只属于你自己。\n")
+    print("（所有数据只存在本机：不联网、不需要 git；跨机器搬家用 WebUI 的「⇩ 全量备份」）")
+    print("注意：投递状态存在 <数据目录>/local/ 下，换电脑时要靠备份 zip 带走。\n")
 
     # 读现有配置作为默认值：重跑安装一路回车不该把已配置的目录清掉
     old = {}
@@ -63,8 +63,8 @@ def main():
             cur = old.get("cv_dir")
             cv_dir = ask(f"CV 目录（回车 = {cur or '仓库内 cv/'}）：") or cur
         cur_name = old.get("my_name", "")
-        name = ask(f"你的名字（写入新岗位的 created_by，队友就知道谁录的；回车 = "
-                   f"{cur_name or '跳过，运行时用 git 用户名'}）：")
+        name = ask(f"你的名字（写进新岗位的 created_by，方便回看谁录的；回车 = "
+                   f"{cur_name or '跳过，不署名'})：")
         if name:
             old["my_name"] = name
     else:
@@ -80,8 +80,8 @@ def main():
         cfg["cv_dir"] = cv_dir
 
     base = resolve(data_dir) if data_dir else ROOT
-    (base / "jobs").mkdir(parents=True, exist_ok=True)    # 共享：招聘信息
-    (base / "local").mkdir(parents=True, exist_ok=True)   # 个人：投递状态，不进 git
+    (base / "jobs").mkdir(parents=True, exist_ok=True)    # 岗位：招聘信息 + 历史版本
+    (base / "local").mkdir(parents=True, exist_ok=True)   # 个人：投递状态
     (base / "data").mkdir(parents=True, exist_ok=True)    # 派生：sqlite 索引
     cv = resolve(cv_dir) if cv_dir else ROOT / "cv"
     cv.mkdir(parents=True, exist_ok=True)
@@ -97,13 +97,13 @@ def main():
     subprocess.run([sys.executable, str(ROOT / "server.py"), "--reindex"], check=False)
 
     print("\n✅ 安装完成")
-    print(f"  共享招聘数据：{base / 'jobs'}")
-    print(f"  个人状态（不进 git）：{base / 'local' / 'status.json'}")
+    print(f"  岗位数据（自动留 3 份历史版本）：{base / 'jobs'}")
+    print(f"  个人状态：{base / 'local' / 'status.json'}")
     print(f"  CV 目录：{cv}")
     if sys.platform == "darwin":
-        print("\n启动：双击 start.command（或 python3 server.py）")
+        print("\n启动：双击 start.command（会自动打开浏览器；或 python3 server.py）")
     elif sys.platform.startswith("win"):
-        print("\n启动：双击 start.bat（或 python server.py）")
+        print("\n启动：双击 start.bat（会自动打开浏览器；或 python server.py）")
     else:
         print("\n启动：python3 server.py")
 

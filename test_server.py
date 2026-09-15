@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""job-stock 自测：用合成数据验证「共享/个人分层」、筛选语义与各种失败模式。
+"""job-stock 自测：用合成数据验证「岗位/个人分层」、筛选语义、版本历史与各种失败模式。
 
 运行：python3 test_server.py
 
@@ -12,14 +12,13 @@
 简化形态——真实前端每次都发全部字段，用简化 body 测出来的「不产生 git diff」是假的。
 """
 import http.client
+import io
 import json
 import os
 import shutil
-import subprocess
 import sys
 import tempfile
 import threading
-import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -86,7 +85,7 @@ def add(**kw):
 
 
 def write_raw(name, obj):
-    """直接往 jobs/ 里写一个手写风格的 JSON（模拟 AI 或合作者手动新建的文件）。"""
+    """直接往 jobs/ 里写一个手写风格的 JSON（模拟 AI 或人手动新建的文件）。"""
     p = TMP / "jobs" / name
     p.write_text(json.dumps(obj, ensure_ascii=False, indent=2), encoding="utf-8")
     return p
@@ -119,11 +118,6 @@ def frontend_body(job, **override):
 TMP = Path(tempfile.mkdtemp(prefix="jobstock-test-"))
 server.configure(data_dir=str(TMP), cv_dir=str(TMP / "cv"))
 (TMP / "jobs").mkdir(parents=True)
-# server 自身也会跑 git（同步/推送/迁移广播）。给整个测试进程设上确定身份，
-# 否则在没有 git config 的机器（CI）上 server 侧的 commit 会失败。
-for _k, _v in (("GIT_AUTHOR_NAME", "t"), ("GIT_AUTHOR_EMAIL", "t@t.test"),
-               ("GIT_COMMITTER_NAME", "t"), ("GIT_COMMITTER_EMAIL", "t@t.test")):
-    os.environ.setdefault(_k, _v)
 
 # ---- 1. 迁移 --------------------------------------------------------------
 print("\n【1】旧数据迁移")
@@ -140,7 +134,7 @@ check("status" not in shared, "共享 JSON 里的 status 已移除")
 check(shared["notes"] == "公共情报", "公共备注留在共享 JSON")
 check(local["老岗位"]["status"] == "面试", "投递状态进了 local/status.json")
 check(shared.get("priority") == "高" and shared.get("contact") == "内推人 A",
-      "迁移保留合作者写的未知字段（不静默删字段）")
+      "迁移保留手写的未知字段（不静默删字段）")
 check(server.migrate_status() == [], "再跑一次不重复迁移（幂等）")
 
 (TMP / "jobs" / "老岗位.json").write_text(json.dumps(
@@ -156,20 +150,20 @@ PORT = SRV.server_address[1]
 threading.Thread(target=SRV.serve_forever, daemon=True).start()
 
 # ---- 2. 共享层与个人层互不干扰 ---------------------------------------------
-print("\n【2】共享/个人分层")
+print("\n【2】岗位/个人分层")
 jid = add(company="测试公司", position="算法工程师", category="算法",
           locations=["北京"], tags=["校招", "AI4S", "急招"], notes="公共情报",
           status="已投递", my_notes="我的私密备注", jd="需要熟悉 PyTorch 与分布式训练")
 path = TMP / "jobs" / f"{jid}.json"
 saved = json.loads(path.read_text(encoding="utf-8"))
-check("status" not in saved and "my_notes" not in saved, "新增岗位：个人字段不写进共享 JSON")
-check(saved["notes"] == "公共情报", "新增岗位：公共备注写进共享 JSON")
+check("status" not in saved and "my_notes" not in saved, "新增岗位：个人字段不写进岗位 JSON")
+check(saved["notes"] == "公共情报", "新增岗位：公共备注写进岗位 JSON")
 check(list(saved.keys()) == [k for k in server.JSON_ORDER if k in saved],
       "共享 JSON 字段顺序与 JSON_ORDER 完全一致（不只是第一个 key）")
 
 before = path.read_bytes()
 code, _ = req("POST", f"/api/jobs/{U(jid)}/status", {"status": "面试"})
-check(code == 200 and path.read_bytes() == before, "快捷改状态：共享 JSON 一个字节都没变")
+check(code == 200 and path.read_bytes() == before, "快捷改状态：岗位 JSON 一个字节都没变")
 code, d = req("GET", f"/api/jobs/{U(jid)}")
 check(d["status"] == "面试" and d["my_notes"] == "我的私密备注", "单条查询返回合并后的完整视图")
 
@@ -189,12 +183,12 @@ check(mini.read_bytes() == mini_before,
 
 code, d = req("PUT", "/api/jobs/精简岗位",
               frontend_body(json.loads(mini.read_text(encoding="utf-8")), my_notes="只改个人备注"))
-check(mini.read_bytes() == mini_before, "只改个人备注：共享 JSON 不变（不产生 git diff）")
+check(mini.read_bytes() == mini_before, "只改个人备注：岗位 JSON 不变")
 
 _, jm = req("GET", "/api/jobs/精简岗位")
 code, d = req("PUT", "/api/jobs/精简岗位", frontend_body(jm, salary="40-60K"))
 check(d.get("shared_changed") is True and
-      json.loads(mini.read_text(encoding="utf-8"))["salary"] == "40-60K", "改共享字段：写进共享 JSON")
+      json.loads(mini.read_text(encoding="utf-8"))["salary"] == "40-60K", "改岗位字段：写进岗位 JSON")
 
 # ---- 3. 枚举外的值不被静默归零 ---------------------------------------------
 print("\n【3】枚举外的值与空值保护")
@@ -268,7 +262,7 @@ write_raw("没有id的岗位.json", {"company": "无 id 公司", "position": "�
 write_raw("重复id-a.json", {"id": "撞车", "company": "甲", "position": "甲岗", "tags": []})
 write_raw("重复id-b.json", {"id": "撞车", "company": "乙", "position": "乙岗", "tags": []})
 code, d = req("POST", "/api/reindex")
-check(any("冲突文件" in x for x in d["skipped"]), "含 git 冲突标记的文件被报告出来")
+check(any("冲突文件" in x for x in d["skipped"]), "读不出来的坏文件被报告出来")
 check(any("撞车" in x for x in d["skipped"]), "重复 id 被报告出来")
 check(ids(query(q="无 id 公司")) == {"没有id的岗位"}, "缺 id 的岗位用文件名兜底，不再凭空消失")
 code, d2 = req("POST", f"/api/jobs/{U('没有id的岗位')}/status", {"status": "已投递"})
@@ -415,105 +409,9 @@ check(broken != (w_tag_pct, w_tag_us, w_q_pct),
 check(server._like("50%_a\\b") == "50\\%\\_a\\\\b", "_like 转义 % _ 与反斜杠")
 check(wildcard_results() == (w_tag_pct, w_tag_us, w_q_pct), "自检后恢复原状")
 
-# ---- 13. git 同步 ----------------------------------------------------------
-print("\n【13】git 同步")
-
-
-def git(*args, cwd):
-    """跑 git，带上确定的身份，避免依赖本机 git config。"""
-    env = {**os.environ, "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t.test",
-           "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t.test",
-           "GIT_CONFIG_GLOBAL": "/dev/null", "GIT_TERMINAL_PROMPT": "0"}
-    return subprocess.run(["git", *args], cwd=str(cwd), capture_output=True, text=True, env=env)
-
-
-def write_job(repo, name, **fields):
-    (repo / "jobs").mkdir(parents=True, exist_ok=True)
-    (repo / "jobs" / f"{name}.json").write_text(
-        json.dumps({"id": name, "tags": [], **fields}, ensure_ascii=False, indent=2),
-        encoding="utf-8")
-
-
-def seed_gitignore(repo):
-    """沙箱仓库补上真实仓库的 .gitignore。
-
-    沙箱是从空 bare 仓库种出来的，不带 .gitignore；而 server 一跑就会生成
-    data/jobs.db、jobs/.jobs.lock、local/ 这些本机文件。没有 ignore 的话
-    add -A 会把它们提交进沙箱 origin，下一台「机器」pull 时就会撞上
-    「untracked working tree files would be overwritten」。
-    """
-    (repo / ".gitignore").write_text(
-        (Path(__file__).resolve().parent / ".gitignore").read_text(encoding="utf-8"),
-        encoding="utf-8")
-
-
-GL = TMP / "gitlab"
-GL.mkdir()
-ORIGIN = GL / "origin.git"
-subprocess.run(["git", "init", "--bare", "-b", "main", str(ORIGIN)], capture_output=True)
-ALICE, BOB = GL / "alice", GL / "bob"
-git("clone", str(ORIGIN), str(ALICE), cwd=GL)
-seed_gitignore(ALICE)
-write_job(ALICE, "共享岗", company="共享公司", position="共享岗位", salary="30K")
-git("add", "-A", cwd=ALICE); git("commit", "-m", "init", cwd=ALICE)
-git("push", "-u", "origin", "main", cwd=ALICE)
-git("clone", str(ORIGIN), str(BOB), cwd=GL)
-
-# 合作者新增一个岗位并推送
-write_job(BOB, "合作者岗", company="乙公司", position="乙岗位")
-git("add", "-A", cwd=BOB); git("commit", "-m", "add", cwd=BOB); git("push", cwd=BOB)
-
-# 本机把工作区弄脏（在 WebUI 里编辑过岗位之后就是这个状态）
-write_job(ALICE, "共享岗", company="共享公司", position="共享岗位", salary="35K")
-server.configure(data_dir=str(ALICE), cv_dir=str(ALICE / "cv"))
-r13 = server.git_sync()
-check(r13["ok"] is True, "工作区脏时也能拉取（--autostash 生效，不再是退出码 128）")
-check((ALICE / "jobs" / "合作者岗.json").exists(), "合作者的新岗位被拉下来了")
-check(json.loads((ALICE / "jobs" / "共享岗.json").read_text(encoding="utf-8"))["salary"] == "35K",
-      "本机未提交的改动在 autostash 后被完整还原")
-check(r13.get("count") == 2, "拉取后重建索引，条数正确")
-ch13 = r13.get("changes") or {}
-check({x["id"] for x in ch13.get("new", [])} == {"合作者岗"}, "变更摘要：合作者的新岗位进 new 桶")
-check(all(x["id"] != "共享岗" for x in ch13.get("updated", [])),
-      "本机未提交的改动不进变更摘要（git diff 基准，不是索引快照）")
-
-# 下架摘要：乙标记下架并推送；甲本机对该岗位还在「面试」，摘要必须把状态带出来
-server.update_local("合作者岗", {"status": "面试"})
-write_job(BOB, "合作者岗", company="乙公司", position="乙岗位", closed=True)
-git("add", "-A", cwd=BOB)
-git("commit", "-m", "bob 下架", cwd=BOB)
-git("push", cwd=BOB)
-r13s = server.git_sync()
-closed13 = [x for x in (r13s.get("changes") or {}).get("closed", []) if x["id"] == "合作者岗"]
-check(bool(closed13) and closed13[0]["my_status"] == "面试",
-      "被下架的岗位进 closed 桶，且带上本机自己的投递状态")
-
-# 双方改同一个岗位 → autostash 贴回来时冲突。git 这时退出码是 0，
-# 不额外检查工作区的话会报「同步完成」，而共享 JSON 里已经写进了冲突标记。
-git("add", "-A", cwd=ALICE); git("commit", "-m", "local", cwd=ALICE)
-git("push", cwd=ALICE)
-git("pull", cwd=BOB)
-write_job(BOB, "共享岗", company="共享公司", position="共享岗位", salary="99K")
-git("add", "-A", cwd=BOB); git("commit", "-m", "bob改薪资", cwd=BOB); git("push", cwd=BOB)
-write_job(ALICE, "共享岗", company="共享公司", position="共享岗位", salary="88K")
-r13b = server.git_sync()
-check(r13b["ok"] is False, "autostash 贴回冲突时不报成功（git 退出码 0 也要判为失败）")
-check("stash" in r13b["message"] and "共享岗" in r13b["message"],
-      "冲突提示里说清楚了哪个文件、改动在 stash 里")
-
-# 数据目录不在 git 仓库里
-server.configure(data_dir=str(TMP), cv_dir=str(TMP / "cv"))
-r13c = server.git_sync()
-check(r13c["ok"] is False and "git 仓库" in r13c["message"], "非 git 仓库给出正确提示")
-server.configure(data_dir=str(TMP / "不存在的盘"), cv_dir=str(TMP / "cv"))
-r13d = server.git_sync()
-check(r13d["ok"] is False and "数据目录不存在" in r13d["message"],
-      "数据目录不存在时提示检查配置，而不是误报「找不到 git 命令」")
-
 # ---- 14. 重复岗位 ------------------------------------------------------------
 print("\n【14】重复岗位的识别与合并")
-# 上一节为了测 git 同步把数据目录切走了，这里必须切回来，否则接口读写的
-# 根本不是同一个目录（这个坑本身就值得留一条注释）
+# 显式钉住数据目录：后面有别的用例会切走目录，这里确保接口读写的是主沙箱
 server.configure(data_dir=str(TMP), cv_dir=str(TMP / "cv"))
 check(server.canonical_id({"company": "甲公司", "job_no": "A123", "position": "随便"})
       == server.canonical_id({"company": "甲公司", "job_no": "A123", "position": "写法不同"}),
@@ -529,7 +427,7 @@ code, d = req("POST", "/api/jobs", {"company": "重复公司", "position": "重�
                                     "job_no": "Z999"})
 check(code == 409 and "已经录过" in d.get("error", ""), "同一个职位号再录一次会被拦下（409）")
 
-# 跨机器的重复绕不过 API —— 合作者的文件是 git pull 进来的
+# 绕过 API 的重复 —— 手写直接放进 jobs/ 的文件
 write_raw("合作者录的重复岗.json", {
     "id": "合作者录的重复岗", "company": "重复公司", "position": "重复岗位",
     "job_no": "Z999", "locations": ["杭州"], "tags": ["内推"], "source": "牛客",
@@ -612,11 +510,11 @@ req("POST", f"/api/jobs/{U(tl)}/status", {"status": "已归档"})
 _, t4 = req("GET", f"/api/jobs/{U(tl)}")
 check(t4["applied_at"] == t1["applied_at"], "归档不影响「投出去的时间」")
 
-# 时间线是个人层的东西，不能进 git
+# 时间线是个人层的东西，不能写进岗位 JSON
 before = (TMP / "jobs" / f"{tl}.json").read_text(encoding="utf-8")
 req("POST", f"/api/jobs/{U(tl)}/status", {"status": "Offer"})
 check((TMP / "jobs" / f"{tl}.json").read_text(encoding="utf-8") == before,
-      "时间线只写 local/，共享 JSON 一个字节都没变")
+      "时间线只写 local/，岗位 JSON 一个字节都没变")
 
 # 老记录（只有 status 没有 history）要补出起点
 with server.local_lock():
@@ -643,10 +541,10 @@ gone = add(company="下架公司", position="已经没了的岗")
 _, g0 = req("GET", f"/api/jobs/{U(gone)}")
 req("PUT", f"/api/jobs/{U(gone)}", frontend_body(g0, closed=True))
 raw_gone = json.loads((TMP / "jobs" / f"{gone}.json").read_text(encoding="utf-8"))
-check(raw_gone.get("closed") is True, "下架标记写进共享 JSON（合作者也能看到）")
+check(raw_gone.get("closed") is True, "下架标记写进岗位 JSON")
 check("closed" not in json.loads(
       (TMP / "jobs" / f"{alive}.json").read_text(encoding="utf-8")),
-      "没下架的岗位不写 closed:false —— 不给每个文件都加一行 git 噪音")
+      "没下架的岗位不写 closed:false —— 不给每个文件都加一行噪音")
 
 # 下架 → 取消下架：文件里不能留下 "closed": false 这行残渣。
 # 单测只覆盖「从没下架过」是不够的，这条路径要走一遍才暴露得出来
@@ -670,7 +568,7 @@ sig = (TMP / "jobs" / f"{gone}.json").read_text(encoding="utf-8")
 code, noop = req("PUT", f"/api/jobs/{U(gone)}", frontend_body(g1))
 check(noop.get("shared_changed") is False, "原样回传不算改动（布尔按布尔比，不按字符串比）")
 check((TMP / "jobs" / f"{gone}.json").read_text(encoding="utf-8") == sig,
-      "no-op 保存不产生 git diff")
+      "no-op 保存不产生任何 diff")
 
 # 手写 JSON 里的各种真值写法都要认
 write_raw("手写下架.json", {"id": "手写下架", "company": "手写公司", "position": "手写岗位",
@@ -828,62 +726,8 @@ server.MAX_BODY = 5 * 1024 * 1024
 check(code == 400, "超过大小上限的请求体被拒绝")
 check(mini.read_bytes() == mini_before19, "被拒绝的请求一个字节都没写进共享 JSON")
 
-# ---- 20. 同步/写入互斥与单实例守卫 --------------------------------------------
-print("\n【20】同步/写入互斥与单实例守卫")
-GL2 = TMP / "locklab"
-GL2.mkdir()
-ORIGIN2 = GL2 / "origin.git"
-subprocess.run(["git", "init", "--bare", "-b", "main", str(ORIGIN2)], capture_output=True)
-LA = GL2 / "alice"
-git("clone", str(ORIGIN2), str(LA), cwd=GL2)
-seed_gitignore(LA)
-write_job(LA, "锁岗", company="锁公司", position="锁岗位", salary="10K")
-git("add", "-A", cwd=LA)
-git("commit", "-m", "init", cwd=LA)
-git("push", "-u", "origin", "main", cwd=LA)
-server.configure(data_dir=str(LA), cv_dir=str(LA / "cv"))
-server.reindex()
-
-real_git20 = server._git
-pull_started = threading.Event()
-release_pull = threading.Event()
-
-
-def fake_pull_git(args, cwd, timeout=120):
-    """拦截 git pull：挂住等信号，然后模拟 checkout 改写工作区里的共享 JSON。"""
-    if args[0] == "pull":
-        pull_started.set()
-        release_pull.wait(60)
-        write_job(LA, "锁岗", company="锁公司", position="锁岗位", salary="99K")
-        return subprocess.CompletedProcess(args, 0, "Already up to date.", "")
-    return real_git20(args, cwd, timeout=timeout)
-
-
-server._git = fake_pull_git
-sync_result = {}
-ts = threading.Thread(target=lambda: sync_result.update(r=server.git_sync()))
-ts.start()
-check(pull_started.wait(15), "同步线程已进入 pull")
-put_result = {}
-tp = threading.Thread(target=lambda: put_result.update(
-    c=req("PUT", "/api/jobs/锁岗", {"salary": "50K", "base_rev": "*"})[0]))
-tp.start()
-time.sleep(1.5)    # 修复后 PUT 必须还卡在锁上；把锁退化掉的话它在这个窗口内早就完成了
-check(not put_result, "pull 进行期间，写请求被阻塞（不会并发改写共享 JSON）")
-release_pull.set()
-ts.join(30)
-tp.join(30)
-server._git = real_git20
-check(sync_result["r"]["ok"] is True, "同步正常完成")
-check(put_result.get("c") == 200, "被阻塞的 PUT 在同步完成后完成")
-final20 = json.loads((LA / "jobs" / "锁岗.json").read_text(encoding="utf-8"))
-check(final20["salary"] == "50K", "checkout 与 PUT 不再互相覆盖（最终内容 = PUT 基于拉取后数据的写入）")
-
-with server.FileLock(server.LOCAL_DIR / ".sync.lock", blocking=False):
-    r_busy = server.git_sync()
-check(r_busy["ok"] is False and "稍后再试" in r_busy["message"],
-      "已有同步进行时，新的同步请求立即被拒绝而不是排队")
-
+# ---- 20. 单实例守卫 ------------------------------------------------------------
+print("\n【20】单实例守卫")
 guard20 = server.FileLock(server.LOCAL_DIR / ".server.lock", blocking=False)
 guard20.__enter__()
 dup_rejected = False
@@ -895,64 +739,15 @@ finally:
     guard20.__exit__()
 check(dup_rejected, "数据目录被占用时第二个实例拒绝启动（不再静默双开）")
 server.configure(data_dir=str(TMP / "guardlab"), cv_dir=str(TMP / "cv"))
+(TMP / "guardlab" / "local").mkdir(parents=True, exist_ok=True)
 server.acquire_instance_guard()      # 成功路径：正常持有，进程剩余时间都算「这个实例」
 server.configure(data_dir=str(TMP), cv_dir=str(TMP / "cv"))
 
-# ---- 21. git_status 与一键推送 ------------------------------------------------
-print("\n【21】git_status 与一键推送")
-GL3 = TMP / "pushlab"
-GL3.mkdir()
-ORIGIN3 = GL3 / "origin.git"
-subprocess.run(["git", "init", "--bare", "-b", "main", str(ORIGIN3)], capture_output=True)
-PA, PB = GL3 / "alice", GL3 / "bob"
-git("clone", str(ORIGIN3), str(PA), cwd=GL3)
-seed_gitignore(PA)
-write_job(PA, "推送岗", company="推送公司", position="推送岗位", salary="10K")
-git("add", "-A", cwd=PA)
-git("commit", "-m", "init", cwd=PA)
-git("push", "-u", "origin", "main", cwd=PA)
-git("clone", str(ORIGIN3), str(PB), cwd=GL3)
-server.configure(data_dir=str(PA), cv_dir=str(PA / "cv"))
-server.reindex()
-
-st0 = server.git_status()
-check(st0["in_repo"] and st0["ahead"] == 0 and st0["upstream"] == "origin/main",
-      "干净仓库：ahead=0 且认出 upstream")
-
-pid21 = add(company="推送公司", position="第二个岗")     # WebUI 录入，未 commit
-st1 = server.git_status()
-check(any(pid21 in x for x in st1["dirty"]["untracked"]), "新增岗位出现在待提交清单里")
-check(st1["ahead"] == 0, "还没 commit 时 ahead 仍是 0（dirty 和 ahead 是两回事）")
-r21 = server.git_push("data: 测试推送")
-check(r21["ok"] is True and r21["pushed"] is True, "一键提交并推送成功")
-st2 = server.git_status()
-check(st2["ahead"] == 0 and not st2["dirty"]["modified"] and not st2["dirty"]["untracked"],
-      "推送后工作区干净、ahead 归零")
-git("pull", cwd=PB)
-check((PB / "jobs" / f"{pid21}.json").exists(), "合作者拉到了推送的岗位")
-
-# push 被拒（远端更新）→ 自动拉平再推，双方改动都不丢
-write_job(PB, "推送岗", company="推送公司", position="推送岗位", salary="99K")
-git("add", "-A", cwd=PB)
-git("commit", "-m", "bob 先推了一步", cwd=PB)
-git("push", cwd=PB)
-write_job(PA, "推送岗2", company="推送公司", position="第三岗")
-r21b = server.git_push("data: 本地也有改动")
-check(r21b["ok"] is True and r21b["pushed"] is True, "push 被拒后自动拉平并重试成功")
-check(json.loads((PA / "jobs" / "推送岗.json").read_text(encoding="utf-8"))["salary"] == "99K",
-      "拉平把合作者的改动带了回来")
-git("pull", cwd=PB)
-check((PB / "jobs" / "推送岗2.json").exists(), "本地的新岗位也一并推了上去，合作者拉得到")
-
-server.configure(data_dir=str(TMP), cv_dir=str(TMP / "cv"))
-check(server.git_status()["in_repo"] is False, "非 git 仓库时 in_repo=False")
-server.configure(data_dir=str(PA), cv_dir=str(PA / "cv"))
-code, d = req("GET", "/api/git_status")
-check(code == 200 and d["in_repo"] is True and "ahead" in d, "GET /api/git_status 路由可用")
+# ---- 21. 版本号与列表契约 -------------------------------------------------------
+print("\n【21】版本号与列表契约")
 _, jobs_resp = req("GET", "/api/jobs")
 check(jobs_resp.get("server_version") == server.SERVER_VERSION,
       "列表响应带 server_version（前端检测网页新/后台旧）")
-server.configure(data_dir=str(TMP), cv_dir=str(TMP / "cv"))
 
 # ---- 23. 合并不丢字段 ----------------------------------------------------------
 print("\n【23】合并不丢字段")
@@ -987,136 +782,6 @@ check(kept.get("contact") == "甲的联系人微信", "未知字段空缺补齐�
 check(kept.get("extra_num") == 7, "非字符串的自定义字段同样保留")
 fields22 = sorted(c["field"] for c in (m22[0].get("conflicts") or []))
 check(fields22 == ["deadline", "salary", "url"], f"冲突清单如实报告：{fields22}")
-
-# ---- 24. 冲突自助引导 ----------------------------------------------------------
-print("\n【24】冲突自助引导")
-GL4 = TMP / "cflab"
-GL4.mkdir()
-ORIGIN4 = GL4 / "origin.git"
-subprocess.run(["git", "init", "--bare", "-b", "main", str(ORIGIN4)], capture_output=True)
-SEED = GL4 / "seed"
-git("clone", str(ORIGIN4), str(SEED), cwd=GL4)
-seed_gitignore(SEED)
-write_job(SEED, "冲突岗", company="冲突演公司", position="冲突演岗位", notes="初始")
-git("add", "-A", cwd=SEED)
-git("commit", "-m", "init", cwd=SEED)
-git("push", "-u", "origin", "main", cwd=SEED)
-
-
-def fresh_conflict(tag):
-    """造一个 rebase 冲突现场：乙先推了改动，甲本地 commit 改了同一行。
-
-    备注内容带上 tag：上一组把 origin 推进到「乙写的」之后，同内容的 commit
-    会变成 no-op，冲突就造不出来了。
-    """
-    A, B = GL4 / f"alice{tag}", GL4 / f"bob{tag}"
-    git("clone", str(ORIGIN4), str(A), cwd=GL4)
-    git("clone", str(ORIGIN4), str(B), cwd=GL4)
-    write_job(B, "冲突岗", company="冲突演公司", position="冲突演岗位", notes=f"乙写的{tag}")
-    git("add", "-A", cwd=B)
-    git("commit", "-m", f"乙改备注{tag}", cwd=B)
-    git("push", cwd=B)
-    write_job(A, "冲突岗", company="冲突演公司", position="冲突演岗位", notes=f"甲写的{tag}")
-    git("add", "-A", cwd=A)
-    git("commit", "-m", f"甲改备注{tag}", cwd=A)
-    return A
-
-
-A24 = fresh_conflict("1")
-server.configure(data_dir=str(A24), cv_dir=str(A24 / "cv"))
-r24 = server.git_sync()
-check(r24["ok"] is False and r24.get("conflict") is True and r24.get("phase") == "rebase",
-      "rebase 冲突保留现场交给页面处理（不再自动 abort 导致同步按钮永久瘫痪）")
-check(r24["files"] == ["jobs/冲突岗.json"], "冲突文件清单正确")
-code, j24 = req("GET", "/api/jobs/冲突岗")
-check(code == 409 and j24.get("conflict_file") == "jobs/冲突岗.json",
-      "冲突文件的单条 GET 返回 409 引导，而不是裸 404 让人以为岗位丢了")
-r24m = server.conflict_resolve("jobs/冲突岗.json", "mine")
-check(r24m["ok"] is True and r24m["finished"] is True, "「保留我的」处理完自动 rebase --continue")
-check(json.loads((A24 / "jobs" / "冲突岗.json").read_text(encoding="utf-8"))["notes"] == "甲写的1",
-      "「保留我的」落盘的是本机改动")
-check(server.git_status()["ahead"] == 1, "rebase --continue 后本机提交还在，可正常推送")
-
-A24b = fresh_conflict("2")
-server.configure(data_dir=str(A24b), cv_dir=str(A24b / "cv"))
-server.git_sync()
-r24t = server.conflict_resolve("jobs/冲突岗.json", "theirs")
-check(r24t["finished"] is True and
-      json.loads((A24b / "jobs" / "冲突岗.json").read_text(encoding="utf-8"))["notes"] == "乙写的2",
-      "「保留对方的」落盘合作者的版本")
-r24x = server.conflict_resolve("jobs/冲突岗.json", "mine")
-check(r24x["ok"] is False, "处理完再调用会被告知不在冲突清单（幂等防线）")
-
-A24c = fresh_conflict("3")
-server.configure(data_dir=str(A24c), cv_dir=str(A24c / "cv"))
-server.git_sync()
-r24b = server.conflict_resolve("jobs/冲突岗.json", "both")
-saved24 = json.loads((A24c / "jobs" / "冲突岗.json").read_text(encoding="utf-8"))
-check(r24b["finished"] is True and "甲写的3" in saved24["notes"] and "乙写的3" in saved24["notes"],
-      "「两边拼接」做字段级合并，双方信息都保留")
-
-# stash 相位：沿用第 13 节留下的 autostash 冲突现场（ALICE 沙箱）
-server.configure(data_dir=str(ALICE), cv_dir=str(ALICE / "cv"))
-r24s = server.conflict_resolve("jobs/共享岗.json", "both")
-check(r24s["ok"] is True and r24s["finished"] is True, "stash 相位：两边拼接处理完成并清理现场")
-saved24s = json.loads((ALICE / "jobs" / "共享岗.json").read_text(encoding="utf-8"))
-check(saved24s["salary"] == "88K", "stash 相位「我的」值（88K）保留")
-check("99K" in saved24s.get("notes", ""), "stash 相位对方的 99K 转存进备注")
-check(git("stash", "list", cwd=ALICE).stdout.strip() == "",
-      "本次同步新建的 stash 已自动 drop，不留垃圾")
-server.configure(data_dir=str(TMP), cv_dir=str(TMP / "cv"))
-
-# ---- 25. id 迁移广播（跨机器搬家个人进度） --------------------------------------
-print("\n【25】id 迁移广播")
-GL5 = TMP / "miglab"
-GL5.mkdir()
-ORIGIN5 = GL5 / "origin.git"
-subprocess.run(["git", "init", "--bare", "-b", "main", str(ORIGIN5)], capture_output=True)
-MA, MB = GL5 / "alice", GL5 / "bob"
-git("clone", str(ORIGIN5), str(MA), cwd=GL5)
-seed_gitignore(MA)
-write_job(MA, "待广播岗", company="广播公司", position="广播岗位")
-git("add", "-A", cwd=MA)
-git("commit", "-m", "init", cwd=MA)
-git("push", "-u", "origin", "main", cwd=MA)
-git("clone", str(ORIGIN5), str(MB), cwd=GL5)
-
-# 乙（另一台机器）在旧 id 上投了 —— 旧版里，甲一补职位号，这块进度就静默归零
-server.configure(data_dir=str(MB), cv_dir=str(MB / "cv"))
-server.reindex()
-server.update_local("待广播岗", {"status": "已投递", "my_notes": "乙的记录"})
-
-# 甲补职位号 → 触发改名 + 写广播记录（随 git 同步给所有人）
-server.configure(data_dir=str(MA), cv_dir=str(MA / "cv"))
-server.reindex()
-write_job(MA, "待广播岗", company="广播公司", position="广播岗位", job_no="B001")
-renamed25 = server.migrate_ids()
-NEW_ID25 = server.canonical_id({"company": "广播公司", "job_no": "B001"})   # 职位号小写化
-check(("待广播岗", NEW_ID25) in renamed25, "补职位号触发 id 升级改名")
-check((MA / "jobs" / ".id-migrations").exists() and
-      {"old": "待广播岗", "new": NEW_ID25} in
-      [{k: m[k] for k in ("old", "new")} for m in server.read_id_migrations()],
-      "改名时写入迁移广播记录（JSONL，随 jobs/ 进 git）")
-git("add", "-A", cwd=MA)
-git("commit", "-m", "feat: 补职位号，id 升级", cwd=MA)
-git("push", cwd=MA)
-
-# 乙同步 → 挂在旧 id 上的进度自动搬到新 id
-server.configure(data_dir=str(MB), cv_dir=str(MB / "cv"))
-r25 = server.git_sync()
-tbl_b = json.loads((MB / "local" / "status.json").read_text(encoding="utf-8"))
-check("待广播岗" not in tbl_b and tbl_b.get(NEW_ID25, {}).get("status") == "已投递",
-      "乙 pull 后旧 id 上的投递进度自动搬到新 id（旧版静默归零且报成功）")
-check(tbl_b[NEW_ID25]["my_notes"] == "乙的记录", "个人备注一并搬过去")
-check(r25.get("migrations") == [], "搬完无告警")
-r25b = server.git_sync()
-check(r25b.get("migrations") == [], "再同步不重复搬（幂等）")
-
-# 新旧键并存时不擅自动手：机器无权裁决两边各有内容的记录，只告警
-server.update_local("待广播岗", {"status": "笔试"})
-w25 = server.apply_id_migrations()
-check(any("并存" in w for w in w25), "新旧键并存时不自动合并，只告警让人裁决")
-server.configure(data_dir=str(TMP), cv_dir=str(TMP / "cv"))
 
 # ---- 26. 录入防重前移与变音符归一 ------------------------------------------------
 print("\n【26】录入防重前移与变音符归一")
@@ -1174,6 +839,80 @@ check(code == 200, "备份失败不阻塞主写（主写成功才是硬要求）
 (bdir27).unlink()
 (TMP / "local" / "backups.bak").rename(bdir27)
 
+# ---- 27b. 岗位版本历史 ---------------------------------------------------------
+print("\n【27b】岗位版本历史（每次写入自动留 3 份旧版本）")
+vh = add(company="版本公司", position="版本岗位", salary="10K")
+_, v0 = req("GET", f"/api/jobs/{U(vh)}")
+code, vl0 = req("GET", f"/api/jobs/{U(vh)}/versions")
+check(code == 200 and vl0["versions"] == [], "新岗位还没有历史版本")
+
+
+def edit_salary(jid, val):
+    _, j = req("GET", f"/api/jobs/{jid}")
+    return req("PUT", f"/api/jobs/{jid}", frontend_body(j, salary=val))
+
+
+for i, val in enumerate(["11K", "12K", "13K", "14K"], start=1):
+    edit_salary(vh, val)
+    _, vlist = req("GET", f"/api/jobs/{U(vh)}/versions")
+    check(len(vlist["versions"]) == min(i, server.HISTORY_KEEP),
+          f"第 {i} 次修改后历史恰好保留 {min(i, server.HISTORY_KEEP)} 份")
+
+_, vlist = req("GET", f"/api/jobs/{U(vh)}/versions")
+ats = [v["at"] for v in vlist["versions"]]
+check(ats == sorted(ats, reverse=True), "版本列表新→旧排列")
+# 连续保存发生在同一秒内：靠微秒文件名轮转，4 次写入后必须恰好挤掉最旧的一份
+hist_dir = TMP / "jobs" / ".history" / vh
+check(len(list(hist_dir.glob("v-*.json"))) == server.HISTORY_KEEP, "磁盘上也只有 3 份历史文件")
+
+# 内容抽查：最新一份历史是「改成 14K 之前」的内容（13K）
+code, latest = req("GET", f"/api/jobs/{U(vh)}/versions/{vlist['versions'][0]['file']}")
+check(code == 200 and latest["salary"] == "13K", "最新历史版本是上次覆盖前的内容")
+
+# 恢复：当前内容（14K）会先留底，然后回到 13K
+code, d = req("POST", f"/api/jobs/{U(vh)}/versions/{vlist['versions'][0]['file']}/restore")
+_, restored = req("GET", f"/api/jobs/{U(vh)}")
+check(code == 200 and restored["salary"] == "13K", "历史版本恢复为当前内容")
+_, vlist2 = req("GET", f"/api/jobs/{U(vh)}/versions")
+check(len(vlist2["versions"]) == server.HISTORY_KEEP
+      and req("GET", f"/api/jobs/{U(vh)}/versions/{vlist2['versions'][0]['file']}")[1]["salary"] == "14K",
+      "恢复前先留底：被顶掉的 14K 进了历史，恢复操作可再撤销")
+check(restored["company"] == "版本公司", "恢复后索引同步刷新（列表口径一致）")
+
+# 路径安全：历史接口不接受奇怪的文件名 / id
+check(req("GET", f"/api/jobs/{U(vh)}/versions/../../status.json")[0] in (404, 400),
+      "历史版本文件名不合法时拒绝（404，不给穿越机会）")
+check(req("GET", "/api/jobs/..%2F..%2Fetc/versions")[0] == 404, "越界 id 的版本列表返回 404")
+
+# 合并重复也留历史：被合并掉的岗位可从历史里恢复回来（undo merge）
+write_raw("版本重复A.json", {"id": "版本重复A", "company": "版本重复公司", "position": "重复岗",
+                           "job_no": "V001", "salary": "1K", "tags": [],
+                           "created_at": "2026-01-01 10:00", "updated_at": "2026-01-01 10:00"})
+write_raw("版本重复B.json", {"id": "版本重复B", "company": "版本重复公司", "position": "重复岗",
+                           "job_no": "V001", "salary": "9K", "notes": "B 的情报", "tags": [],
+                           "created_at": "2026-01-02 10:00", "updated_at": "2026-01-02 10:00"})
+req("POST", "/api/reindex")
+code, dd27 = req("POST", "/api/dedupe")
+dropped27 = [x for m in dd27["merged"] for x in m["dropped"]]
+check(bool(dropped27), "重复组被合并")
+_, vlist3 = req("GET", f"/api/jobs/{U(dropped27[0])}/versions")
+check(len(vlist3["versions"]) >= 1, "被合并删除的岗位在历史里留了底")
+code, d = req("POST", f"/api/jobs/{U(dropped27[0])}/versions/{vlist3['versions'][0]['file']}/restore")
+check(code == 200 and req("GET", f"/api/jobs/{U(dropped27[0])}")[0] == 200,
+      "从历史恢复被合并掉的岗位（合并可撤销）")
+
+# 全量备份 zip：包含岗位、历史与个人状态，不含锁文件
+import zipfile, urllib.request
+with urllib.request.urlopen(f"http://127.0.0.1:{PORT}/api/backup") as r:
+    check(r.status == 200 and r.headers.get("Content-Type") == "application/zip",
+          "全量备份接口返回 zip")
+    zf = zipfile.ZipFile(io.BytesIO(r.read()))
+names = zf.namelist()
+check(any(n.startswith("jobs/") and n.endswith(".json") for n in names), "备份里有岗位 JSON")
+check(any(".history/" in n for n in names), "备份里有历史版本")
+check("local/status.json" in names, "备份里有个人状态")
+check(not any(n.endswith(".lock") for n in names), "备份不含锁文件")
+
 # ---- 28. 入口校验三件套 ----------------------------------------------------------
 print("\n【28】入口校验三件套")
 code, d = raw_http("GET", "/api/jobs", {"Host": "evil.com"})
@@ -1183,13 +922,13 @@ check(code == 200, "localhost 带端口照常放行")
 code, d = raw_http("POST", "/api/dedupe", {"Host": f"127.0.0.1:{PORT}",
                                            "Sec-Fetch-Site": "cross-site"}, b"{}")
 check(code == 403, "浏览器跨站触发的写端点被拒绝（空 body 也逃不过 Sec-Fetch-Site）")
-code, d = raw_http("POST", "/api/sync", {"Host": f"127.0.0.1:{PORT}",
-                                         "Sec-Fetch-Site": "same-origin"}, b"{}")
+code, d = raw_http("POST", "/api/reindex", {"Host": f"127.0.0.1:{PORT}",
+                                            "Sec-Fetch-Site": "same-origin"}, b"{}")
 check(code == 200, "同源的正常请求不受影响")
 code, d = raw_http("PUT", "/api/jobs/精简岗位",
                    {"Host": f"127.0.0.1:{PORT}", "Content-Type": "text/plain"}, b"{}")
 check(code == 415, "非 JSON 的 Content-Type 被拒绝")
-code, d = raw_http("POST", "/api/sync", {"Host": f"127.0.0.1:{PORT}"})   # 无 body 无 CT
+code, d = raw_http("POST", "/api/reindex", {"Host": f"127.0.0.1:{PORT}"})   # 无 body 无 CT
 check(code == 200, "无 body 的 curl 式 POST 不受影响（AGENTS.md 的用法保持可用）")
 
 # ---- 29. 贡献者字段 created_by / updated_by --------------------------------------

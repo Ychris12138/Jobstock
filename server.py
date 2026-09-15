@@ -1,37 +1,38 @@
 #!/usr/bin/env python3
-"""job-stock 服务器：纯 Python 标准库，零依赖。
+"""job-stock 服务器：纯 Python 标准库，零依赖的本地求职管理工具。
 
 用法：
-    python server.py [--port 8770]     # 启动 WebUI
+    python server.py [--port 8770]     # 启动 WebUI（默认自动打开浏览器）
+    python server.py --no-open         # 启动但不自动打开浏览器
     python server.py --reindex         # 只重建 sqlite 索引后退出
 
-数据分两层，这是本项目的核心约定：
+数据全在本机，不依赖任何外部服务或版本库：
 
-    共享层  <data>/jobs/<id>.json      招聘信息本身，进 git，团队共同维护
-    个人层  <data>/local/status.json   投递状态 + 个人备注，不进 git，只留在本机
-    索引层  <data>/data/jobs.db        由上面两层派生的 sqlite 索引，可随时重建
-
-改共享层要走 git 同步；改个人层只影响自己，绝不产生 git diff。
+    岗位层  <data>/jobs/<id>.json       招聘信息；每次改写前自动留 3 份历史版本
+                                       （jobs/.history/<id>/，替代 git 的后悔药）
+    个人层  <data>/local/status.json    投递状态 + 个人备注；写前快照进 local/backups/
+    索引层  <data>/data/jobs.db         由上面两层派生的 sqlite 索引，可随时重建
 
 一条贯穿全文件的原则：**本版本表达不了的值，保留并告警，绝不静默归零。**
-多人可能跑着不同版本的本文件（枚举不同），岗位 JSON 也可能是手写的，
-所以「控件读不出来」不等于「用户想清空」。
+岗位 JSON 也可能是手写的，「控件读不出来」不等于「用户想清空」。
 """
 import argparse
 import difflib
 import functools
 import hashlib
+import io
 import json
 import os
 import re
 import shutil
 import sqlite3
-import subprocess
 import sys
 import threading
 import traceback
 import unicodedata
 import urllib.parse
+import urllib.request
+import webbrowser
 from datetime import datetime, timedelta as _timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -39,16 +40,16 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent
 CONFIG_PATH = ROOT / "config.json"
 WEB_DIR = ROOT / "web"
-SERVER_VERSION = "0.3.0"   # 随功能性改动一起更新；前端用它检测「网页新、后台旧」
+SERVER_VERSION = "0.4.0"   # 随功能性改动一起更新；前端用它检测「网页新、后台旧」
 
 _my_name_cache = {"n": None, "done": False}
 
 
 def my_name():
-    """本机身份：config.json 的 my_name，回退 git config user.name；都没有返回空串。
+    """本机身份：config.json 的 my_name，没有就返回空串。
 
-    只用于 created_by / updated_by 的自动注入。缓存一次结果 —— 每次保存都去
-    跑一条 git 子进程没必要。
+    只用于 created_by / updated_by 的自动注入。缓存一次结果 ——
+    每次保存都重读一遍配置文件没有必要。
     """
     if _my_name_cache["done"]:
         return _my_name_cache["n"]
@@ -58,27 +59,18 @@ def my_name():
             n = norm_text(json.loads(CONFIG_PATH.read_text(encoding="utf-8")).get("my_name"))
         except Exception:
             n = ""
-    if not n:
-        try:
-            p = subprocess.run(["git", "config", "user.name"], cwd=ROOT,
-                               capture_output=True, text=True, timeout=10)
-            if p.returncode == 0:
-                n = norm_text(p.stdout)
-        except Exception:
-            n = ""
     _my_name_cache["n"], _my_name_cache["done"] = n, True
     return n
 
-# 数据位置：默认都在仓库内；可用 config.json 或 CLI 参数 --data-dir / --cv-dir 覆盖。
+# 数据位置：默认都在工具目录内；可用 config.json 或 CLI 参数 --data-dir / --cv-dir 覆盖。
 JOBS_DIR = ROOT / "jobs"
 LOCAL_DIR = ROOT / "local"
 CV_DIR = ROOT / "cv"
 DB_PATH = ROOT / "data" / "jobs.db"
 
 # 写锁。全局锁序（所有写路径必须一致遵守，否则死锁）：
-#   FileLock(LOCAL_DIR/".sync.lock")         同步/推送互斥（非阻塞，忙即拒绝）
-# → jobs_lock()                              共享层跨进程锁（可重入）
-# → _JOBS_LOCK（RLock）                      共享层进程内锁
+# → jobs_lock()                              岗位层跨进程锁（可重入）
+# → _JOBS_LOCK（RLock）                      岗位层进程内锁
 # → _LOCAL_LOCK（RLock）                     个人层进程内锁
 # → local_lock()＝FileLock(".status.lock")   个人层跨进程锁（最内层；flock 按
 #                                            打开的文件描述计，同进程不可重入，
@@ -187,9 +179,9 @@ class _ReentrantJobsLock:
 
 
 def jobs_lock():
-    """共享层（jobs/*.json）的跨进程写锁，同线程可重入。
+    """岗位层（jobs/*.json）的跨进程写锁，同线程可重入。
 
-    可重入是必需的：git_sync 全程持锁，其内部调用的 migrate / migrate_ids 也要
+    可重入是必需的：migrate_ids 全程持锁，其内部调用的 rename_job 也要
     拿同一把锁 —— flock 按「打开的文件描述」计，同一进程开第二个 fd 再锁同一
     文件会直接死锁，所以同线程的重复进入只在最外层真正加/解锁。
     """
@@ -258,20 +250,19 @@ KNOWN_CITIES = ["北京", "上海", "深圳", "杭州", "广州", "成都", "南
                 "珠海", "无锡", "澳门", "台北", "新加坡", "东京", "首尔", "伦敦",
                 "纽约", "西雅图", "远程"]
 
-# 共享字段 —— 写进 jobs/<id>.json，随 git 同步给所有人
+# 岗位字段 —— 写进 jobs/<id>.json，只存在本机
 # locations 是数组：一个岗位常常多地可选，塞进单值字段会丢信息
-# created_by / updated_by 由服务端在写入时自动注入（config.json 的 my_name，
-# 回退 git config user.name），agent 与手写 JSON 都不需要填
+# created_by / updated_by 由服务端在写入时自动注入（config.json 的 my_name），
+# agent 与手写 JSON 都不需要填
 SHARED_FIELDS = ["company", "position", "job_no", "category", "recruit_type", "url",
                  "locations", "salary", "source", "deadline", "tags", "notes", "jd", "closed",
                  "created_by", "updated_by"]
-# 布尔字段。closed = 岗位已下架/关闭，属于共享信息：一个人发现投递入口没了，
-# 其他人就不必再点进去确认一次。它和「已归档」不是一回事 —— 归档是个人层的
-# 「我不投了」，下架是客观事实。
+# 布尔字段。closed = 岗位已下架/关闭：客观事实，列表里默认收起来。
+# 它和「已归档」不是一回事 —— 归档是个人层的「我不投了」，下架是岗位没了。
 BOOL_FIELDS = ["closed"]
 # 个人字段 —— 写进 local/status.json，只留在本机
 LOCAL_FIELDS = ["status", "my_notes"]
-# JSON 落盘的字段顺序：固定下来，多人协作时 git diff 才干净
+# JSON 落盘的字段顺序：固定下来，历史版本之间比对 diff 才干净
 JSON_ORDER = ["id"] + SHARED_FIELDS + ["created_at", "updated_at"]
 
 # sqlite 索引表的列。改这里不需要迁移脚本 —— reindex 会 DROP 重建整张表。
@@ -447,8 +438,8 @@ _KW_CACHE = {"sig": None, "keywords": []}
 def cv_keywords():
     """本机 cv/*.reading.md 里的关键词，合并去重。
 
-    CV 与解读文件不进 git，所以这份关键词天然是「本机这个人的」——
-    匹配度因此属于个人层，改 CV 不会产生任何 git diff，也不会影响合作者看到的数据。
+    CV 解读文件只在本机，所以这份关键词天然是「本机这个人的」——
+    匹配度因此属于个人层：改 CV 只影响自己看到的排序。
     按 (文件名, mtime, 大小) 缓存：整库重建索引时每条岗位都重读一遍文件没必要。
     """
     try:
@@ -512,8 +503,8 @@ def slugify(text):
 def canonical_id(job):
     """由岗位内容算出规范 id。
 
-    有官方职位号就用「公司-职位号」：两个人各自录同一个岗位时必然算出同一个 id，
-    于是重复会变成 git 冲突（看得见、要处理），而不是两条静默共存的记录。
+    有官方职位号就用「公司-职位号」：同一个岗位不管录几次都算出同一个 id，
+    重复会被录入防重拦下，而不是两条静默共存的记录。
     没有职位号时退回「公司-岗位名」，这时写法稍有出入就会漏判，只能靠去重检测兜底。
     """
     company = norm_text(job.get("company"))
@@ -587,7 +578,7 @@ def write_json_atomic(path, data):
             tmp.unlink(missing_ok=True)
 
 
-# ---------------------------------------------------------------- 共享层：岗位 JSON
+# ---------------------------------------------------------------- 岗位层：JSON 文件
 
 def job_path(job_id):
     """由 id 推出 JSON 路径；任何越界写法（路径穿越）返回 None。"""
@@ -614,12 +605,12 @@ def load_shared(job_id):
 
 
 def ordered_job(job):
-    """按固定顺序整理共享字段；未知字段保留在后面。
+    """按固定顺序整理岗位字段；未知字段保留在后面。
 
-    保留未知字段很重要：合作者可能跑着更新的版本、多写了几个字段，
-    本机不该在改一次状态时把它们无声删掉。
+    保留未知字段很重要：文件可能是手写的或旧版本写的、多写了几个字段，
+    改一次状态时把它们无声删掉就再也找不回来了。
     """
-    # 值为假的布尔字段不落盘：给每条岗位都写一行 "closed": false 只会制造 git 噪音，
+    # 值为假的布尔字段不落盘：给每条岗位都写一行 "closed": false 只会制造噪音，
     # 而且「没有这个字段」和「字段为 false」本来就该是同一个意思。
     # drop 必须同时挡住下面那个「保留未知字段」的循环 —— 否则刚丢掉的字段会被它加回来，
     # 表现为「标记下架再取消，文件里就多出一行 closed: false」。
@@ -632,7 +623,7 @@ def ordered_job(job):
 
 
 def job_rev(job):
-    """共享层内容指纹，用作乐观锁版本号。
+    """岗位内容指纹，用作乐观锁版本号。
 
     不能用 updated_at 充当版本号：它只精确到分钟，同一分钟内的两次修改指纹相同，
     冲突检测会失效。
@@ -641,8 +632,64 @@ def job_rev(job):
     return hashlib.sha1(payload.encode("utf-8")).hexdigest()[:12]
 
 
+# ---------------------------------------------------------------- 版本历史
+
+# 每个岗位保留的历史版本数。改写/删除岗位文件前，旧内容先进 jobs/.history/<id>/。
+# 这是「没有 git 之后的后悔药」：改坏了、误合并了、删掉了，都能从这里恢复。
+HISTORY_KEEP = 3
+HISTORY_DIR = ".history"
+# 版本文件名：v-<微秒时间戳>.json。字典序 = 时间序，轮转与列举都不用额外排序键
+VERSION_RE = re.compile(r"^v-(\d{8})-(\d{6})-(\d{6})\.json$")
+
+
+def history_dir(job_id):
+    return JOBS_DIR / HISTORY_DIR / norm_text(job_id)
+
+
+def snapshot_version(job_id, src):
+    """把岗位文件的当前内容存进历史目录，保留最近 HISTORY_KEEP 份。
+
+    任何一步失败只告警，绝不阻塞主写 —— 和 write_local 的备份一样，
+    备份是保险丝，主写失败才是真事故。
+    """
+    try:
+        hdir = history_dir(job_id)
+        hdir.mkdir(parents=True, exist_ok=True)
+        n = datetime.now()
+        dst = hdir / f"v-{n.strftime('%Y%m%d-%H%M%S-%f')}.json"
+        while dst.exists():
+            n += _timedelta(microseconds=1)
+            dst = hdir / f"v-{n.strftime('%Y%m%d-%H%M%S-%f')}.json"
+        shutil.copy2(src, dst)
+        olds = sorted(hdir.glob("v-*.json"))
+        for old in olds[:-HISTORY_KEEP]:
+            old.unlink(missing_ok=True)
+    except OSError as e:
+        print(f"⚠️ 岗位历史版本保存失败（本次写入照常进行）：{e}", file=sys.stderr)
+
+
+def version_files(job_id):
+    """某岗位的历史版本文件，新→旧。id 不合法或没有历史返回 []。"""
+    hdir = history_dir(job_id)
+    if not norm_text(job_id) or not hdir.is_dir():
+        return []
+    return sorted((f for f in hdir.iterdir() if VERSION_RE.match(f.name)), reverse=True)
+
+
+def version_meta(f):
+    """把版本文件名解析成 {file, at, size} 供前端展示。"""
+    m = VERSION_RE.match(f.name)
+    at = (f"{m.group(1)[:4]}-{m.group(1)[4:6]}-{m.group(1)[6:]} "
+          f"{m.group(2)[:2]}:{m.group(2)[2:4]}:{m.group(2)[4:]}") if m else ""
+    try:
+        size = f.stat().st_size
+    except OSError:
+        size = 0
+    return {"file": f.name, "at": at, "size": size}
+
+
 def save_job(job):
-    """写共享岗位 JSON。"""
+    """写岗位 JSON。覆盖已有文件前先留一份历史版本。"""
     p = job_path(job.get("id"))
     if not p:
         raise ValueError(f"非法的岗位 id：{job.get('id')!r}")
@@ -652,6 +699,8 @@ def save_job(job):
     for k in BOOL_FIELDS:
         if k in job:
             job[k] = norm_bool(job[k])
+    if p.exists():
+        snapshot_version(job.get("id"), p)
     write_json_atomic(p, ordered_job(job))
 
 
@@ -665,7 +714,7 @@ def read_local_strict():
     """严格读个人状态表。文件不存在返回 {}；存在但读不出来抛 LocalStateError。
 
     这个区分是关键：把「解析失败」当成「空表」，接着的整表写回就会永久抹掉
-    全部投递进度，而个人层不进 git，没有任何备份可回滚。
+    全部投递进度（写前快照只在成功写入时才发生，救不了这一步）。
     """
     p = local_path()
     if not p.exists():
@@ -698,9 +747,9 @@ BACKUP_KEEP = 10          # local/backups/ 里保留的最近快照份数
 def write_local(table):
     """个人状态表落盘，写前把旧文件快照进 local/backups/（保留最近 BACKUP_KEEP 份）。
 
-    个人层不进 git，sqlite 也不覆盖它 —— 这是全系统唯一没有安全网的不可再生数据
-    （jobs 进 git 可回滚，jobs.db 可 DROP 重建）。误删、磁盘故障、手改写坏，靠的
-    就是这里的写前快照。快照任何一步失败只告警，绝不阻塞主写：备份是保险丝，
+    个人进度是全系统最不可再生的数据（岗位 JSON 有 .history、索引可 DROP 重建，
+    而误删、磁盘故障、手改写坏的防线只有这里的写前快照）。
+    快照任何一步失败只告警，绝不阻塞主写：备份是保险丝，
     主写失败才是真事故。
     """
     p = local_path()
@@ -742,7 +791,7 @@ def applied_at(rec):
 
 
 def update_local(job_id, patch):
-    """原子更新单个岗位的个人状态。注意：不碰共享 JSON，因此不会产生 git diff。
+    """原子更新单个岗位的个人状态。注意：不碰岗位 JSON。
 
     状态确实发生变化时往 history 追加一条，这就是投递时间线的唯一来源。
     只改备注不写历史 —— 否则时间线会被无意义的重复条目淹没。
@@ -806,7 +855,7 @@ def merge_local(job, table=None):
 
 
 def _upgrade_shared(job):
-    """把一条旧格式的共享岗位升级到当前字段结构。返回 True 表示确实改了。
+    """把一条旧格式的岗位 JSON 升级到当前字段结构。返回 True 表示确实改了。
 
     处理三件事（都幂等）：
       1. location（单值字符串）→ locations（数组）—— 一个岗位常常多地可选，
@@ -843,16 +892,16 @@ def _upgrade_shared(job):
 
 
 def migrate():
-    """把旧版共享 JSON 升级到当前结构（幂等），返回被改动的岗位 id 列表。
+    """把旧版岗位 JSON 升级到当前结构（幂等），返回被改动的岗位 id 列表。
 
     两类升级：
-      - status / my_notes 搬进个人状态文件（私人数据，不该进 git）
-      - 共享字段的结构升级，见 _upgrade_shared
+      - status / my_notes 搬进个人状态文件（私人数据，不该留在岗位 JSON 里）
+      - 岗位字段的结构升级，见 _upgrade_shared
 
-    合作者用旧版本写出的 JSON 被 pull 下来后，也会在下次启动时自动处理。
+    改写前给原文件留一份历史版本 —— 结构升级也是改动，改坏了要能回退。
     """
     moved = []
-    # 也要拿共享层锁：这个函数会重写共享 JSON，和 POST/PUT 走的是同一批文件
+    # 也要拿岗位层锁：这个函数会重写岗位 JSON，和 POST/PUT 走的是同一批文件
     with jobs_lock(), _JOBS_LOCK, _LOCAL_LOCK, local_lock():
         table = read_local_strict()
         local_dirty = False
@@ -863,7 +912,7 @@ def migrate():
             jid = norm_text(job.get("id")) or f.stem
             stale = [k for k in LOCAL_FIELDS if k in job]
             if stale:
-                # 本地已有记录以本地为准，只从共享文件里摘掉字段，避免覆盖真实进度
+                # 本地已有记录以本地为准，只从岗位文件里摘掉字段，避免覆盖真实进度
                 if jid not in table:
                     rec = {k: job[k] for k in stale}
                     rec["updated_at"] = job.get("updated_at", now())
@@ -875,6 +924,7 @@ def migrate():
                 continue
             job["id"] = jid
             # 按文件原路径写回（文件名可能和 id 不一致），并保留未知字段
+            snapshot_version(jid, f)
             write_json_atomic(f, ordered_job(job))
             moved.append(jid)
         if local_dirty:
@@ -887,14 +937,11 @@ migrate_status = migrate   # 旧名字，保持向后兼容
 
 
 def rename_job(old_id, new_id):
-    """给岗位换 id：共享文件改名 + 个人状态的键跟着搬 + 广播迁移记录。
+    """给岗位换 id：岗位文件改名 + 个人状态的键跟着搬。
 
     两边必须一起改 —— 只改文件名的话，投递进度就跟岗位脱节了（状态还挂在旧 id 上，
     界面上看到的会变回「待投递」）。目标 id 已被占用时返回 False 不动手，
     那种情况说明真撞车了，交给去重流程处理。
-
-    广播：本机能搬自己的个人状态，搬不了别人的 —— 其他机器 pull 到改名后的文件时，
-    靠 jobs/.id-migrations 里的记录把他们的孤儿键搬过去（见 apply_id_migrations）。
     """
     old_p, new_p = job_path(old_id), job_path(new_id)
     if not old_p or not new_p or not old_p.exists() or new_p.exists():
@@ -903,6 +950,7 @@ def rename_job(old_id, new_id):
     if not isinstance(job, dict):
         return False
     job["id"] = new_id
+    snapshot_version(old_id, old_p)     # 旧 id 名下留底，改名前的内容可追溯
     write_json_atomic(new_p, ordered_job(job))
     old_p.unlink(missing_ok=True)
     with _LOCAL_LOCK, local_lock():
@@ -910,70 +958,7 @@ def rename_job(old_id, new_id):
         if old_id in table:
             table[new_id] = {**table.get(new_id, {}), **table.pop(old_id)}
             write_local(table)
-    try:
-        # JSONL 追加而不是整只 JSON 数组：两台机器并发追加时 git 按行合并干净
-        with open(JOBS_DIR / ".id-migrations", "a", encoding="utf-8") as f:
-            f.write(json.dumps({"old": old_id, "new": new_id, "at": now()},
-                               ensure_ascii=False) + "\n")
-    except OSError as e:
-        print(f"⚠️ 迁移记录写入失败（其他机器将无法自动跟随这次改名）：{e}", file=sys.stderr)
     return True
-
-
-MIGRATIONS_FILE = ".id-migrations"   # 位于 jobs/ 下；无 .json 后缀，扫描不会把它当岗位
-
-
-def read_id_migrations():
-    """读迁移广播表。坏行跳过（追加式日志，半截行不该炸掉整个启动）。"""
-    p = JOBS_DIR / MIGRATIONS_FILE
-    if not p.exists():
-        return []
-    out = []
-    for line in p.read_text(encoding="utf-8", errors="replace").splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            d = json.loads(line)
-        except Exception:
-            continue
-        if isinstance(d, dict) and norm_text(d.get("old")) and norm_text(d.get("new")):
-            out.append(d)
-    return out
-
-
-def apply_id_migrations():
-    """按广播表把本机的孤儿个人状态键搬到新 id 名下，返回告警列表。
-
-    幂等：搬完旧键即消失，重复执行是空操作。三种情况：
-      old 键在、new 键不在 → 搬（本机还没跟上这次改名的正常情况）
-      old 键不在           → 早已搬过或本来就没有，跳过
-      两键并存             → 不动（两边各有内容时机器无权裁决），只告警让人处理
-    """
-    warnings = []
-    ms = read_id_migrations()
-    if not ms:
-        return warnings
-    with _LOCAL_LOCK, local_lock():
-        table = read_local_strict()
-        dirty = False
-        for m in ms:
-            old, new = norm_text(m["old"]), norm_text(m["new"])
-            if old not in table:
-                continue
-            has_content = (norm_text(table[old].get("status")) not in ("", "待投递")
-                           or norm_text(table[old].get("my_notes"))
-                           or clean_history(table[old]))
-            if new in table:
-                if has_content:
-                    warnings.append(f"个人状态里「{old}」和「{new}」并存（岗位已改名为后者），"
-                                    f"旧记录未自动合并，请到编辑框确认后手工处理")
-                continue
-            table[new] = {**table.get(new, {}), **table.pop(old)}
-            dirty = True
-        if dirty:
-            write_local(table)
-    return warnings
 
 
 def migrate_ids():
@@ -1049,7 +1034,7 @@ def merge_two_jobs(a, b):
 
     原则与 merge_group 声明的一致：空字段用对方补齐；locations / tags 取并集；
     closed 取或；notes 与 jd 双方都有就拼接 —— 宁可留着让人删，也不要悄悄丢掉
-    合作者写的情报。其余文本字段（url/salary/deadline/job_no/source…）双方都有
+    任何一边写的情报。其余文本字段（url/salary/deadline/job_no/source…）双方都有
     且不同时，保留 a 的值、b 的值转存进 notes 并记入 conflicts；未知字段同样
     空缺补齐（此前它们会随被删文件一起蒸发）。冲突必须可见 —— 静默丢掉对方
     的 JD 曾是合并逻辑的头号罪过。
@@ -1092,12 +1077,13 @@ def merge_two_jobs(a, b):
 def merge_group(ids):
     """把一组重复岗位合并成一条，返回 (保留的 id, 被删掉的 id 列表, 冲突清单)。
 
-    共享层：空字段用其他条补齐；locations / tags 取并集；notes 内容不同就拼起来，
-    宁可留着让人删，也不要悄悄丢掉别人写的情报。
+    岗位层：空字段用其他条补齐；locations / tags 取并集；notes 内容不同就拼起来，
+    宁可留着让人删，也不要悄悄丢掉信息。
     个人层：状态取走得最远的那个（见 STATUS_RANK），个人备注拼接。
+    被合并掉的文件在删除前先留历史版本 —— 合并错了可以在编辑框里恢复回来。
 
     岗位快照必须在**拿锁之后**读：锁外读到的快照可能在写回前被并发的 PUT 改掉，
-    用陈旧快照算出的合并结果写回 = 静默回滚别人刚保存的编辑。
+    用陈旧快照算出的合并结果写回 = 静默回滚刚保存的编辑。
     """
     with jobs_lock(), _JOBS_LOCK, _LOCAL_LOCK, local_lock():
         jobs = [j for j in (load_shared(i) for i in ids) if j]
@@ -1135,7 +1121,8 @@ def merge_group(ids):
         for j in others:
             table.pop(j["id"], None)
             p = job_path(j["id"])
-            if p:
+            if p and p.exists():
+                snapshot_version(j["id"], p)
                 p.unlink(missing_ok=True)
         write_local(table)
         save_job(merged)
@@ -1243,7 +1230,7 @@ def reindex():
         for f in sorted(JOBS_DIR.glob("*.json")):
             job = load_json(f)
             if not isinstance(job, dict):
-                skipped.append(f"{f.name}：读不出来（JSON 格式错误，或含 git 冲突标记）")
+                skipped.append(f"{f.name}：读不出来（JSON 格式错误）")
                 continue
             jid = norm_text(job.get("id")) or f.stem   # 缺 id 用文件名兜底，不丢数据
             if jid in seen:
@@ -1348,7 +1335,7 @@ def list_jobs(query):
     # 已归档默认收起来，除非用户显式筛「已归档」
     if one("hide_archived") == "1" and "已归档" not in vals("status"):
         sql += " AND status!='已归档'"
-    # 已下架的岗位同理默认收起来。它是共享层的客观事实，不是个人选择
+    # 已下架的岗位同理默认收起来。它是客观事实，不是个人选择
     if one("hide_closed") == "1":
         sql += " AND closed=''"
     # 匹配度门槛：match_hits 在索引里是 TEXT，必须 CAST，否则 '10' < '2' 是真
@@ -1382,7 +1369,7 @@ def list_jobs(query):
         stats = deadline_stats(conn)
     finally:
         conn.close()
-    # 枚举外的存量取值也要能筛（比如合作者跑着更新的版本，加了新方向）
+    # 枚举外的存量取值也要能筛（手写 JSON 可能用了新方向，旧枚举里没有）
     for key, enum in (("category", CATEGORIES), ("recruit_type", RECRUIT_TYPES)):
         facets[key] = sorted(set(facets[key]) | set(enum),
                              key=lambda v: (v not in enum, enum.index(v) if v in enum else 0, v))
@@ -1397,393 +1384,6 @@ def list_jobs(query):
         r["days_left"] = days_between(today, r["deadline"]) if r.get("deadline") else None
     return {"jobs": rows, "facets": facets, "stats": stats,
             "sorts": list(SORTS), "cv_keywords": cv_keywords()}
-
-
-# ---------------------------------------------------------------- git 同步
-
-def _git(args, cwd, timeout=120, env_extra=None):
-    """跑一条 git 命令。禁掉交互式认证，否则会挂在提示符上直到超时。"""
-    env = {**os.environ, "GIT_TERMINAL_PROMPT": "0",
-           "GIT_SSH_COMMAND": os.environ.get("GIT_SSH_COMMAND", "ssh -oBatchMode=yes"),
-           **(env_extra or {})}
-    return subprocess.run(["git", "-c", "core.quotepath=false", *args], cwd=cwd,
-                          capture_output=True, text=True, timeout=timeout, env=env)
-
-
-def _unmerged_paths(repo):
-    """列出处于未合并（冲突）状态的文件。"""
-    try:
-        p = _git(["status", "--porcelain"], cwd=repo, timeout=30)
-    except (OSError, subprocess.SubprocessError):
-        return []
-    out = []
-    for line in p.stdout.splitlines():
-        # 冲突态的两位状态码：UU / AA / DD，或任一位是 U
-        if len(line) > 3 and (line[0] == "U" or line[1] == "U" or line[:2] in ("AA", "DD")):
-            out.append(line[3:].strip())
-    return out
-
-
-def _rebase_in_progress(repo):
-    """仓库是否停在 rebase 中间态。
-
-    不能直接看 repo/.git/rebase-merge —— 在 linked worktree 里 .git 是文件不是目录，
-    真实状态在 .git/worktrees/<name>/ 下面，必须问 git 要路径。
-    """
-    for name in ("rebase-merge", "rebase-apply"):
-        try:
-            p = _git(["rev-parse", "--git-path", name], cwd=repo, timeout=20)
-        except (OSError, subprocess.SubprocessError):
-            continue
-        if p.returncode != 0:
-            continue
-        path = Path(p.stdout.strip())
-        if not path.is_absolute():
-            path = repo / path
-        if path.exists():
-            return True
-    return False
-
-
-def _locate_repo():
-    """找到 JOBS_DIR 所属的 git 仓库顶层。返回 (repo, None) 或 (None, 错误信息)。"""
-    if not JOBS_DIR.is_dir():
-        return None, (f"数据目录不存在：{JOBS_DIR}\n"
-                      f"（外接硬盘没插？目录被改名？检查 config.json）")
-    try:
-        p = _git(["rev-parse", "--show-toplevel"], cwd=JOBS_DIR, timeout=20)
-    except FileNotFoundError:
-        return None, "找不到 git 命令，请先安装 git。"
-    except (OSError, subprocess.SubprocessError) as e:
-        return None, f"无法定位 git 仓库：{e}"
-    if p.returncode != 0:
-        return None, (f"{JOBS_DIR} 不在任何 git 仓库里，无法同步。\n"
-                      f"（数据目录若配置在仓库外，就只能各机器独立使用）")
-    return Path(p.stdout.strip()), None
-
-
-def git_sync():
-    """git pull --rebase --autostash 拉取合作者维护的招聘数据，然后重建索引。
-
-    只拉不推：推送涉及个人判断（写什么 commit message、要不要先 review），留给人做。
-
-    --autostash 是必需的：在 WebUI 里编辑过任何岗位后工作区就是脏的，
-    不 autostash 的话 git 会以退出码 128 拒绝 rebase，同步按钮等于常年失效。
-
-    全程持有 .sync.lock（跨进程，非阻塞：已有同步/推送在进行就直接拒绝）与
-    共享/个人两层进程内锁 —— pull 的 checkout 会改写 jobs/*.json，不锁的话
-    和并发的 POST/PUT 互相覆盖，两边都以为自己的写入成功了。
-    """
-    repo, err = _locate_repo()
-    if not repo:
-        return {"ok": False, "message": err}
-
-    fl = FileLock(LOCAL_DIR / ".sync.lock", blocking=False)
-    try:
-        fl.__enter__()
-    except LockBusy:
-        return {"ok": False, "message": "已有同步或推送正在进行，请稍后再试。"}
-    try:
-        with jobs_lock(), _JOBS_LOCK, _LOCAL_LOCK:
-            return _pull_and_reindex(repo)
-    finally:
-        fl.__exit__()
-
-
-# 上次同步是否为各仓库新建了 autostash（repo 路径 → True）。决定冲突处理完后
-# 要不要 stash drop —— 只清理本次同步自己创建的条目，别人的 stash 不能碰。
-_LAST_SYNC_STASH = {}
-
-
-def _stash_rev(repo):
-    """当前 stash 栈顶的 rev；空栈返回空串。"""
-    p = _git(["rev-parse", "-q", "--verify", "refs/stash"], cwd=repo, timeout=20)
-    return p.stdout.strip() if p.returncode == 0 else ""
-
-
-def _pull_and_reindex(repo):
-    """pull → 迁移 → 重建索引的公共主体。调用方必须已持有 .sync.lock 与各层锁。"""
-    old_rev = ""
-    p0 = _git(["rev-parse", "HEAD"], cwd=repo, timeout=20)
-    if p0.returncode == 0:
-        old_rev = p0.stdout.strip()
-    stash_before = _stash_rev(repo)
-    try:
-        p = _git(["pull", "--rebase", "--autostash"], cwd=repo, timeout=60)
-    except subprocess.TimeoutExpired:
-        return {"ok": False, "message": "git pull 超时（60 秒）。可能在等认证，"
-                                        "请到终端手动执行一次 git pull 完成认证。"}
-    except (OSError, subprocess.SubprocessError) as e:
-        return {"ok": False, "message": f"git pull 执行失败：{e}"}
-
-    out = (p.stdout + p.stderr).strip()
-    if p.returncode != 0:
-        if _rebase_in_progress(repo):
-            # 停在 rebase 中间态。不再自作主张 --abort —— 冲突的 commit 不清掉的话，
-            # 下次同步还会撞同一个冲突再回滚一次，同步按钮从此永久瘫痪。保留现场，
-            # 交给 /api/conflict/resolve 在页面上三选一，处理完自动继续。
-            files = _unmerged_paths(repo)
-            r = reindex()      # 带冲突标记的文件此刻读不出来，先把它们从索引里摘出来
-            tail = ""
-            if r.get("skipped"):
-                tail = ("\n\n以下文件暂读不出来（含冲突标记），已从索引中摘出，"
-                        "处理完自动回来：\n  " + "\n  ".join(r["skipped"]))
-            return {"ok": False, "conflict": True, "phase": "rebase", "files": files,
-                    "message": "拉取遇到冲突：合作者的改动和你本地未推送的提交改了同一个岗位。\n\n"
-                               "冲突文件：\n  " + "\n  ".join(files) + tail
-                               + "\n\n在页面上为每个文件选「保留我的 / 保留对方的 / 两边拼接」，"
-                                 "全部处理完会自动继续；也可以到终端手动处理（git status 看现场）。\n\n"
-                               + out}
-        # 其余失败（网络 / 认证等）照旧只报错
-        return {"ok": False, "message": (out or f"git pull 失败（退出码 {p.returncode}）")}
-
-    # 退出码 0 不等于干净：fast-forward 成功、但 autostash 把本地改动贴回来时冲突，
-    # git 也返回 0。此时共享 JSON 里已经写进了冲突标记，改动被留在 stash 里。
-    conflicted = _unmerged_paths(repo)
-    if conflicted:
-        now_stash = _stash_rev(repo)
-        _LAST_SYNC_STASH[str(repo)] = bool(now_stash) and now_stash != stash_before
-        r = reindex()      # 先把带冲突标记的文件从索引里摘出来，别让列表停在旧数据上
-        tail = ""
-        if r.get("skipped"):
-            tail = ("\n\n以下文件暂读不出来（含冲突标记），已从索引中摘出，"
-                    "处理完自动回来：\n  " + "\n  ".join(r["skipped"]))
-        return {"ok": False, "conflict": True, "phase": "stash", "files": conflicted,
-                "message":
-                "已拉到合作者的改动，但你本地未提交的改动在贴回来时和它冲突了。\n\n"
-                "冲突文件：\n  " + "\n  ".join(conflicted) + tail + "\n\n"
-                "在页面上为每个文件选「保留我的 / 保留对方的 / 两边拼接」，全部处理完"
-                "会自动清理 stash 并重建索引；你的原始改动安全地存在 git stash 里"
-                "（终端跑 git stash list 能看到）。\n\n" + out}
-
-    migrate_w24 = apply_id_migrations()   # 先按广播表搬孤儿键，再做本机结构迁移
-    migrate()
-    migrate_ids()
-    return {"ok": True, "message": out, "changes": _sync_changes(repo, old_rev),
-            "migrations": migrate_w24, **reindex()}
-
-
-def _sync_changes(repo, old_rev):
-    """拉取前后的 jobs/ 差异，按「新增 / 更新 / 被下架」分类，供页面摘要展示。
-
-    基准必须是 git 的 old..HEAD 而不是索引快照：索引快照会把同步期间本机自己的
-    写入、autostash 贴回的本地改动都误报成「拉到的变更」。git diff 只含真正被
-    拉下来的 commit 触及的文件。（本机已 commit 未推送的提交经 rebase 后也在
-    这个区间里 —— 那是你自己的改动，列出来无害。）
-
-    「被下架」桶会带上本机自己的投递状态：合作者下了一个你还在面试的岗位，
-    这条必须红字示警，而不是让你从列表里找不到它时以为数据丢了。
-    """
-    empty = {"new": [], "updated": [], "closed": []}
-    if not old_rev:
-        return empty
-    p = _git(["diff", "--name-status", old_rev, "HEAD", "--", "jobs"], cwd=repo, timeout=30)
-    if p.returncode != 0:
-        return empty
-    new_l, upd_l, closed_l = [], [], []
-    table = load_local()
-    for line in p.stdout.splitlines():
-        parts = line.split("\t")
-        if len(parts) < 2:
-            continue
-        st, names = parts[0], parts[1:]
-        path = names[-1] if st.startswith("R") else names[0]     # 重命名取新名
-        name = Path(path).name
-        if not name.endswith(".json") or name.startswith("."):
-            continue
-        job = load_shared(name[:-len(".json")])
-        if not job:
-            continue
-        item = {"id": job["id"], "company": norm_text(job.get("company")),
-                "position": norm_text(job.get("position"))}
-        if norm_bool(job.get("closed")):
-            rec = table.get(job["id"])
-            item["my_status"] = ((norm_text(rec.get("status")) or "待投递")
-                                 if isinstance(rec, dict) else "待投递")
-            closed_l.append(item)
-        elif st.startswith("A"):
-            new_l.append(item)
-        else:
-            upd_l.append(item)
-    return {"new": new_l, "updated": upd_l, "closed": closed_l}
-
-
-def git_status(fetch=False):
-    """本地 git 状态概览：领先/落后远端多少、jobs/ 下有哪些未提交改动。
-
-    ahead 是「本地 commit 了但没推送」的数量 —— 只拉不推的同步模型里，这个数
-    就是「你录的数据别人看不到」的直接证据，必须让它常驻页面上可见，否则本地
-    commit 会无限堆积而本人毫无察觉。
-
-    behind 需要 git fetch（网络调用、可能等认证），只在调用方明确要求时才算，
-    绝不放进页面加载路径。
-    """
-    repo, err = _locate_repo()
-    if not repo:
-        return {"in_repo": False, "message": err}
-
-    def out(args, timeout=30):
-        p = _git(args, cwd=repo, timeout=timeout)
-        return p.stdout.strip() if p.returncode == 0 else ""
-
-    branch = out(["rev-parse", "--abbrev-ref", "HEAD"]) or "HEAD"
-    upstream = out(["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"]) or None
-    ahead = int(out(["rev-list", "--count", "@{u}..HEAD"]) or 0) if upstream else None
-    behind = None
-    if fetch and upstream:
-        fp = _git(["fetch"], cwd=repo, timeout=60)
-        behind = int(out(["rev-list", "--count", "HEAD..@{u}"]) or 0) if fp.returncode == 0 else None
-    modified, untracked = [], []
-    p = _git(["status", "--porcelain", "--", "jobs"], cwd=repo, timeout=30)
-    for line in p.stdout.splitlines():
-        if len(line) < 4:
-            continue
-        st, name = line[:2], line[3:]
-        if Path(name).name.startswith("."):     # 锁文件等辅助文件不进预览
-            continue
-        if st.strip() == "??":
-            untracked.append(name)
-        else:
-            modified.append(f"{st} {name}")
-    lp = _git(["log", "--oneline", "@{u}..HEAD"] if upstream else ["log", "--oneline", "-10"],
-              cwd=repo, timeout=30)
-    unpushed = [x for x in lp.stdout.splitlines() if x.strip()] if lp.returncode == 0 else []
-    return {"in_repo": True, "branch": branch, "upstream": upstream, "ahead": ahead,
-            "behind": behind, "unpushed_commits": unpushed,
-            "dirty": {"modified": modified, "untracked": untracked},
-            "last_commit_at": out(["log", "-1", "--format=%ci", "--", "jobs"])}
-
-
-def git_push(message):
-    """提交 jobs/ 下的共享层改动并推送。调用方（页面）必须先展示预览、经人确认。
-
-    只 add jobs/：个人层、CV、config 本就被 gitignore 挡住，这里再收一道口子，
-    保证「推送」永远碰不到共享招聘数据以外的任何东西。推送要人确认的原则落在
-    两个「不」上：无确认不 commit，无预览不 push。
-    """
-    repo, err = _locate_repo()
-    if not repo:
-        return {"ok": False, "message": err}
-    fl = FileLock(LOCAL_DIR / ".sync.lock", blocking=False)
-    try:
-        fl.__enter__()
-    except LockBusy:
-        return {"ok": False, "message": "已有同步或推送正在进行，请稍后再试。"}
-    try:
-        st = git_status()
-        if not st["in_repo"]:
-            return {"ok": False, "message": st.get("message", "无法定位 git 仓库")}
-        dirty = st["dirty"]
-        ahead = st["ahead"] or 0
-        if not dirty["modified"] and not dirty["untracked"] and not ahead:
-            return {"ok": True, "pushed": False, "status": st,
-                    "message": "没有可推送的改动：jobs/ 下没有未提交内容，"
-                               "本地也没有领先远端的 commit。"}
-        with jobs_lock(), _JOBS_LOCK:
-            _git(["add", "--", "jobs"], cwd=repo, timeout=60)
-            if _git(["diff", "--cached", "--quiet"], cwd=repo, timeout=30).returncode != 0:
-                if not norm_text(message):
-                    message = (f"data: WebUI 推送（更新 {len(dirty['modified'])}、"
-                               f"新增 {len(dirty['untracked'])}）")
-                c = _git(["commit", "-m", norm_text(message)], cwd=repo, timeout=60)
-                if c.returncode != 0:
-                    return {"ok": False, "message": "git commit 失败：\n" + (c.stdout + c.stderr).strip()}
-        up = _git(["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"],
-                  cwd=repo, timeout=20)
-        if up.returncode == 0:
-            push_args = ["push"]
-        else:
-            branch = _git(["rev-parse", "--abbrev-ref", "HEAD"], cwd=repo, timeout=20).stdout.strip()
-            push_args = ["push", "-u", "origin", branch or "main"]
-        p = _git(push_args, cwd=repo, timeout=120)
-        if p.returncode != 0:
-            # 远端比本地新：先拉平（复用同步的 rebase --autostash 流程）再推一次
-            with jobs_lock(), _JOBS_LOCK, _LOCAL_LOCK:
-                pulled = _pull_and_reindex(repo)
-            if not pulled["ok"]:
-                files = _unmerged_paths(repo)
-                return {"ok": False, "conflict": bool(files), "files": files,
-                        "message": "推送被拒（远端有新提交），自动拉取时遇到冲突"
-                                   + ("，请在页面上处理冲突后重试：" if files else "：\n")
-                                   + "\n\n" + pulled["message"]}
-            p = _git(push_args, cwd=repo, timeout=120)
-            if p.returncode != 0:
-                return {"ok": False, "message": "拉平后推送仍失败：\n" + (p.stdout + p.stderr).strip()}
-        return {"ok": True, "pushed": True, "status": git_status(),
-                "message": (p.stdout + p.stderr).strip()}
-    finally:
-        fl.__exit__()
-
-
-def conflict_resolve(file, action):
-    """页面上的冲突三选一：保留我的 / 保留对方的 / 两边拼接。
-
-    取内容必须按 stage 号而不是 --ours/--theirs 旗标：pull --rebase 冲突时
-    stage 2（ours）是远端内容、stage 3（theirs）才是本地提交，与 merge 的直觉
-    正好相反；autostash 贴回冲突时语义又不同。而 stage 号在两种场景下恒定：
-    3 = 本方改动、2 = 对方内容 —— 一套代码，按钮文案不会有歧义。
-
-    rebase 相位：全部文件处理完自动 `rebase --continue`（之后 autostash 会自动
-    贴回，若贴回又冲突，会再次进入 stash 相位的流程）；
-    stash 相位：处理完自动 drop 掉本次同步新建的 stash 条目。
-    """
-    file = norm_text(file).replace("\\", "/")
-    if action not in ("mine", "theirs", "both"):
-        return {"ok": False, "message": "action 必须是 mine / theirs / both"}
-    repo, err = _locate_repo()
-    if not repo:
-        return {"ok": False, "message": err}
-    unmerged = _unmerged_paths(repo)
-    if file not in unmerged:
-        msg = (f"{file} 不在冲突清单里。当前冲突：\n  " + "\n  ".join(unmerged)) \
-            if unmerged else f"{file} 不在冲突清单里（可能已经处理完了）。"
-        return {"ok": False, "message": msg}
-    in_rebase = _rebase_in_progress(repo)
-    if action in ("mine", "theirs"):
-        stage = "3" if action == "mine" else "2"
-        p = _git(["show", f":{stage}:{file}"], cwd=repo, timeout=30)
-        if p.returncode != 0:
-            return {"ok": False, "message": "读取冲突文件两侧内容失败：\n" + (p.stdout + p.stderr).strip()}
-        content = p.stdout
-    else:
-        sides = {}
-        for stage in ("3", "2"):
-            ps = _git(["show", f":{stage}:{file}"], cwd=repo, timeout=30)
-            if ps.returncode != 0:
-                return {"ok": False, "message": "读取冲突文件两侧内容失败：\n" + (ps.stdout + ps.stderr).strip()}
-            try:
-                sides[stage] = json.loads(ps.stdout)
-            except Exception:
-                return {"ok": False, "message": "有一侧的内容不是合法 JSON（可能被手工改过），"
-                                                "「两边拼接」做不了；请选「保留我的 / 保留对方的」"
-                                                "或到终端处理。"}
-        # 本方为底：对方的非空差异按合并规则补齐或转存，谁的信息都不丢
-        merged, _cf = merge_two_jobs(sides["3"], sides["2"])
-        merged["id"] = Path(file).stem
-        content = json.dumps(ordered_job(merged), ensure_ascii=False, indent=2)
-    try:
-        (repo / file).write_text(content, encoding="utf-8")
-    except OSError as e:
-        return {"ok": False, "message": f"写回冲突文件失败：{e}"}
-    _git(["add", "--", file], cwd=repo, timeout=30)
-
-    remaining = _unmerged_paths(repo)
-    if remaining:
-        return {"ok": True, "finished": False, "remaining": remaining}
-    note = ""
-    if in_rebase:
-        c = _git(["rebase", "--continue"], cwd=repo, timeout=120, env_extra={"GIT_EDITOR": "true"})
-        if c.returncode != 0:
-            return {"ok": False, "message": "冲突已解决，但 git rebase --continue 失败：\n"
-                                            + (c.stdout + c.stderr).strip()}
-    elif _LAST_SYNC_STASH.get(str(repo)):
-        d = _git(["stash", "drop"], cwd=repo, timeout=30)
-        if d.returncode == 0:
-            note = "，stash 里的临时改动已清理"
-        _LAST_SYNC_STASH.pop(str(repo), None)
-    with jobs_lock(), _JOBS_LOCK, _LOCAL_LOCK:
-        rr = reindex()
-    return {"ok": True, "finished": True, "remaining": [], "note": note, **rr}
 
 
 # ---------------------------------------------------------------- HTTP
@@ -1879,6 +1479,53 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def send_backup(self):
+        """全量备份：把 jobs/（含历史版本）与 local/ 打成 zip 下载。
+
+        不含 sqlite 索引（可随时重建）与 CV 原文（体积大且涉及个人隐私，
+        用户自己知道 CV 在哪）。内存里打 zip —— 数据量是几百个几 KB 的 JSON，
+        不会有压力。
+        """
+        import zipfile
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
+            for base, name in ((JOBS_DIR, "jobs"), (LOCAL_DIR, "local")):
+                if not base.is_dir():
+                    continue
+                for f in sorted(base.rglob("*")):
+                    if not f.is_file():
+                        continue
+                    # 根目录下的锁文件（.jobs.lock 等）跳过；
+                    # .history/ 子目录里的历史版本要带上（备份的意义就在这）
+                    if f.name.startswith(".") and f.parent == base:
+                        continue
+                    z.write(f, f"{name}/{f.relative_to(base)}")
+        body = buf.getvalue()
+        fname = f"jobstock-backup-{datetime.now().strftime('%Y%m%d-%H%M%S')}.zip"
+        self.send_response(200)
+        self.send_header("Content-Type", "application/zip")
+        self.send_header("Content-Disposition", f'attachment; filename="{fname}"')
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def restore_version(self, job_id, fname):
+        """把某个历史版本恢复为当前内容（当前内容会先留一份新历史）。"""
+        job_id = norm_text(job_id)
+        f = history_dir(job_id) / fname
+        if not VERSION_RE.match(fname) or not f.is_file():
+            return self.send_json({"error": "not found"}, 404)
+        d = load_json(f)
+        if not isinstance(d, dict):
+            return self.send_json({"error": "这个历史版本文件读不出来（JSON 格式错误）"}, 500)
+        with jobs_lock(), _JOBS_LOCK:
+            job = dict(d)
+            job["id"] = job_id
+            job["updated_at"] = now()      # 恢复也是一次改动，列表的「最近更新」要反映它
+            save_job(job)                  # 覆盖前自动把当前内容留进历史
+        index_one(load_shared(job_id))
+        return self.send_json({"ok": True})
+
     def read_body(self):
         """读并解析 JSON 请求体；不合法抛 BadRequest（safe_route 转 400）。
 
@@ -1906,8 +1553,8 @@ class Handler(BaseHTTPRequestHandler):
         """校验受控枚举与日期格式。返回错误信息，合法则返回 None。
 
         只对「显式传了且非空」的值校验：空串一律当成「不设置」而不是「清空」。
-        编辑已有岗位时只校验**真正改动过**的字段（见 do_PUT）——否则合作者用更新
-        版本写的分类（本机枚举里没有）会在原样回传时被 400 拦下，逼着前端清空它。
+        编辑已有岗位时只校验**真正改动过**的字段（见 do_PUT）——否则手写 JSON
+        里的枚举外分类（本机枚举里没有）会在原样回传时被 400 拦下，逼着前端清空它。
         """
         c = norm_text(data.get("category"))
         if c and c not in CATEGORIES:
@@ -1962,29 +1609,30 @@ class Handler(BaseHTTPRequestHandler):
             return self.send_json({**d, "statuses": STATUSES, "categories": CATEGORIES,
                                    "recruit_types": RECRUIT_TYPES,
                                    "server_version": SERVER_VERSION})
-        if path == "/api/git_status":
-            return self.send_json(
-                git_status(fetch=query.get("fetch", ["0"])[0] in ("1", "true")))
+        m = re.fullmatch(r"/api/jobs/([^/]+)/versions", path)
+        if m:
+            return self.send_json({"versions": [version_meta(f)
+                                                for f in version_files(m.group(1))]})
+        m = re.fullmatch(r"/api/jobs/([^/]+)/versions/([^/]+)", path)
+        if m:
+            f = history_dir(m.group(1)) / m.group(2)
+            if not VERSION_RE.match(m.group(2)) or not f.is_file():
+                return self.send_json({"error": "not found"}, 404)
+            d = load_json(f)
+            if not isinstance(d, dict):
+                return self.send_json({"error": "这个历史版本文件读不出来（JSON 格式错误）"}, 500)
+            return self.send_json(d)
+        if path == "/api/backup":
+            return self.send_backup()
         m = re.fullmatch(r"/api/jobs/([^/]+)", path)
         if m:
             job = load_shared(m.group(1))
             if not job:
                 p = job_path(m.group(1))
                 if p and p.exists():
-                    # 文件在、读不出：多半是 git 冲突标记。裸 404 会让用户以为岗位丢了
-                    try:
-                        head = p.read_text(encoding="utf-8", errors="replace")
-                    except OSError:
-                        head = ""
-                    if "<<<<<<<" in head:
-                        repo, _err = _locate_repo()
-                        phase = "rebase" if (repo and _rebase_in_progress(repo)) else "stash"
-                        return self.send_json({
-                            "error": "这个岗位的文件里还有未处理的 git 冲突标记，"
-                                     "处理完之前它不会出现在列表里。",
-                            "conflict_file": f"jobs/{p.name}", "phase": phase,
-                            "guide": "按页面顶部的冲突提示选「保留我的 / 保留对方的 / 两边拼接」，"
-                                     "或到终端运行 git status 查看现场。"}, 409)
+                    # 文件在、读不出（JSON 格式错误）。裸 404 会让用户以为岗位丢了
+                    return self.send_json({"error": "这个岗位的文件读不出来（JSON 格式错误），"
+                                                    "点「↻ 重建索引」可以在提示里看到文件名。"}, 409)
                 return self.send_json({"error": "not found"}, 404)
             merged = merge_local(job)
             kws = cv_keywords()
@@ -2022,17 +1670,12 @@ class Handler(BaseHTTPRequestHandler):
             return
         path = urllib.parse.unquote(urllib.parse.urlparse(self.path).path)
         if path == "/api/reindex":
-            mig_w = apply_id_migrations()
             migrate()
             migrate_ids()
-            return self.send_json({"ok": True, "migrations": mig_w, **reindex()})
-        if path == "/api/sync":
-            return self.send_json(git_sync())
-        if path == "/api/push":
-            return self.send_json(git_push(self.read_body().get("message", "")))
-        if path == "/api/conflict/resolve":
-            b = self.read_body()
-            return self.send_json(conflict_resolve(b.get("file", ""), b.get("action", "")))
+            return self.send_json({"ok": True, **reindex()})
+        m = re.fullmatch(r"/api/jobs/([^/]+)/versions/([^/]+)/restore", path)
+        if m:
+            return self.restore_version(m.group(1), m.group(2))
         if path == "/api/dedupe":
             # 只合并强信号的重复组（同职位号 / 同链接）。名字相似属于疑似，
             # 同一家公司不同部门完全可能有同名岗位，那种要人来判断。
@@ -2053,7 +1696,7 @@ class Handler(BaseHTTPRequestHandler):
             err = self.bad_values(data)
             if err:
                 return self.send_json({"error": err}, 400)
-            # 先探一次个人层：它坏了就别写共享层，否则会留下一个谁也删不掉的孤儿岗位
+            # 先探一次个人层：它坏了就别写岗位层，否则会留下一个谁也删不掉的孤儿岗位
             read_local_strict()
             with jobs_lock(), _JOBS_LOCK:      # id 分配 + 落盘要一起做，否则并发新增会互相覆盖
                 base = canonical_id(data)
@@ -2157,7 +1800,7 @@ class Handler(BaseHTTPRequestHandler):
             if err:
                 return self.send_json({"error": err}, 400)
             # 乐观锁：客户端回传打开编辑框时的内容指纹，对不上说明这条被别人（或
-            # 另一个标签页、或刚同步下来的合作者改动）改过，拒绝盲写
+            # 另一个标签页、或恢复过的旧版本）改过，拒绝盲写
             base = norm_text(data.get("base_rev"))
             if touched and not base:
                 return self.send_json({
@@ -2165,8 +1808,8 @@ class Handler(BaseHTTPRequestHandler):
                              "否则可能覆盖掉别人的改动。确实要强制覆盖就传 base_rev=\"*\"。"}, 400)
             if touched and base != "*" and base != job_rev(job):
                 return self.send_json({
-                    "error": "这条岗位在你打开编辑框之后被改过了（可能来自另一个标签页，"
-                             "或刚同步下来的合作者改动）。请关闭弹窗重新打开这条岗位，再改一次。",
+                    "error": "这条岗位在你打开编辑框之后被改过了（可能是另一个标签页，"
+                             "或刚恢复过历史版本）。请关闭弹窗重新打开这条岗位，再改一次。",
                     "conflict": True}, 409)
             if touched:
                 job.update(touched)
@@ -2187,6 +1830,20 @@ class Handler(BaseHTTPRequestHandler):
         self.send_json({"ok": True, "shared_changed": bool(touched)})
 
 
+def _server_alive(port):
+    """探测本机端口上是否已经跑着一个 job-stock（GET /api/jobs 通即为活）。"""
+    try:
+        with urllib.request.urlopen(f"http://127.0.0.1:{port}/api/jobs", timeout=1.5) as r:
+            return r.status == 200
+    except Exception:
+        return False
+
+
+def _open_browser(url):
+    """延迟一点再开浏览器：先让 bind 完成，页面才不会打开成「连接被拒」。"""
+    threading.Timer(0.6, lambda: webbrowser.open(url)).start()
+
+
 def main():
     # 非 UTF-8 locale 的 Windows 重定向输出时，启动横幅里的 emoji/中文会炸。
     # reconfigure 只在新式 TextIOWrapper 上存在，老式包装（如某些 IDE）没有就跳过
@@ -2198,6 +1855,8 @@ def main():
     ap.add_argument("--data-dir", help="数据目录（内含 jobs/ local/ data/），覆盖 config.json")
     ap.add_argument("--cv-dir", help="CV 目录，覆盖 config.json")
     ap.add_argument("--reindex", action="store_true", help="只重建索引后退出")
+    ap.add_argument("--no-open", action="store_true",
+                    help="启动后不自动打开浏览器（默认会打开）")
     args = ap.parse_args()
     configure(args.data_dir, args.cv_dir)
 
@@ -2206,9 +1865,20 @@ def main():
     if not JOBS_DIR.is_dir():
         sys.exit(f"数据目录不存在：{JOBS_DIR}\n"
                  f"请检查 {CONFIG_PATH} 里的 data_dir，或先跑一次：python install.py")
-    acquire_instance_guard()
-    for w in apply_id_migrations():
-        print(f"⚠️  {w}")
+
+    # 一键启动的关键路径：已经有一个实例在跑时，双击启动脚本不该报错吓人，
+    # 直接把浏览器指到活着的那个实例上就好（探测默认端口段）。
+    try:
+        acquire_instance_guard()
+    except SystemExit:
+        for p in range(args.port, args.port + 10):
+            if _server_alive(p):
+                url = f"http://localhost:{p}"
+                print(f"job-stock 已经在运行：{url}\n（同一份数据只能开一个实例，这次只帮你打开页面。）")
+                if not args.no_open:
+                    webbrowser.open(url)
+                return
+        raise
 
     try:
         # 时间线的补种在 migrate() 内部做，不要在这里再调一次 migrate_local()：
@@ -2251,13 +1921,30 @@ def main():
     if args.reindex:
         print(f"已重建索引：{r['count']} 条岗位（{JOBS_DIR}）")
         return
-    try:
-        srv = ThreadingHTTPServer(("127.0.0.1", args.port), Handler)
-    except OSError:
-        print(f"端口 {args.port} 被占用，换个端口：python server.py --port 8771")
+
+    # 端口默认自动避让：8770 被别的程序占了就用 8771…，双击启动永远能打开。
+    # 显式传 --port 则尊重用户选择，占用时报错退出（脚本/定时任务依赖固定端口）。
+    explicit = any(a == "--port" or a.startswith("--port=") for a in sys.argv)
+    ports = [args.port] if explicit else range(args.port, args.port + 10)
+    port, srv = None, None
+    for p in ports:
+        try:
+            srv = ThreadingHTTPServer(("127.0.0.1", p), Handler)
+            port = p
+            break
+        except OSError:
+            continue
+    if srv is None:
+        hint = f"python server.py --port {args.port + 10}"
+        print(f"端口 {args.port}" + ("" if explicit else f"～{args.port + 9}")
+              + f" 被占用，换个端口：{hint}")
         sys.exit(1)
-    print(f"job-stock 已启动：http://localhost:{args.port}  （索引 {r['count']} 条岗位，Ctrl+C 停止）")
-    print(f"  共享招聘数据：{JOBS_DIR}\n  个人状态（不进 git）：{local_path()}\n  CV 目录：{CV_DIR}")
+    url = f"http://localhost:{port}"
+    print(f"job-stock 已启动：{url}  （索引 {r['count']} 条岗位，关掉本窗口或 Ctrl+C 停止）")
+    print(f"  岗位数据（自动留 3 份历史版本）：{JOBS_DIR}\n"
+          f"  个人状态：{local_path()}\n  CV 目录：{CV_DIR}")
+    if not args.no_open:
+        _open_browser(url)
     srv.serve_forever()
 
 
