@@ -41,7 +41,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent
 CONFIG_PATH = ROOT / "config.json"
 WEB_DIR = ROOT / "web"
-SERVER_VERSION = "0.1.0"   # 随功能性改动一起更新；前端用它检测「网页新、后台旧」
+SERVER_VERSION = "0.1.1"   # 随功能性改动一起更新；前端用它检测「网页新、后台旧」
 
 _my_name_cache = {"n": None, "done": False}
 
@@ -190,6 +190,15 @@ def jobs_lock():
 
 
 _INSTANCE_GUARD = None
+
+
+def install_fingerprint():
+    """本安装实例的短指纹：由工具根目录绝对路径算出。
+
+    用于区分「同一台机器上另一份 job-stock 副本」——单实例探测若只看端口是否
+    通，会把别的目录里跑着的旧 server 当成自己，双击启动就打开错页面。
+    """
+    return hashlib.sha1(str(ROOT.resolve()).encode("utf-8")).hexdigest()[:12]
 
 
 def acquire_instance_guard():
@@ -1825,7 +1834,8 @@ class Handler(BaseHTTPRequestHandler):
             d = list_jobs(query)
             return self.send_json({**d, "statuses": STATUSES, "categories": CATEGORIES,
                                    "recruit_types": RECRUIT_TYPES,
-                                   "server_version": SERVER_VERSION})
+                                   "server_version": SERVER_VERSION,
+                                   "install_fp": install_fingerprint()})
         m = re.fullmatch(r"/api/jobs/([^/]+)/versions", path)
         if m:
             return self.send_json({"versions": [version_meta(f)
@@ -2056,11 +2066,20 @@ class Handler(BaseHTTPRequestHandler):
         self.send_json({"ok": True, "shared_changed": bool(touched)})
 
 
-def _server_alive(port):
-    """探测本机端口上是否已经跑着一个 Jobstock（GET /api/jobs 通即为活）。"""
+def _server_alive(port, fp=None):
+    """探测端口上是否跑着**同一份工具目录**的 Jobstock。
+
+    只 GET /api/jobs 还不够：别的副本（例如 job-stock-general）也能答 200，
+    会把双击启动指到错误页面。必须比对 install_fp。
+    fp 可注入，便于单测只改「期望值」而不影响同进程内的 Handler。
+    """
+    expected = install_fingerprint() if fp is None else fp
     try:
         with urllib.request.urlopen(f"http://127.0.0.1:{port}/api/jobs", timeout=1.5) as r:
-            return r.status == 200
+            if r.status != 200:
+                return False
+            d = json.loads(r.read().decode("utf-8", errors="replace") or "{}")
+        return d.get("install_fp") == expected
     except Exception:
         return False
 

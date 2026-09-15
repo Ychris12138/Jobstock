@@ -1164,6 +1164,18 @@ try:
 finally:
     hold.close()
 
+# ---- 35. 单实例探测必须比对 install_fp（防打开别的副本）--------------------------
+print("\n【35】install_fp 区分不同工具目录")
+fp_a = server.install_fingerprint()
+check(isinstance(fp_a, str) and len(fp_a) == 12, "install_fingerprint 返回 12 位短指纹")
+_, jlist = req("GET", "/api/jobs")
+check(jlist.get("install_fp") == fp_a, "/api/jobs 带上本安装的 install_fp")
+# 只注入「期望指纹」——不能 monkeypatch install_fingerprint 本身，
+# 同一进程里的 Handler 也会跟着变，两边又对上了。
+check(server._server_alive(PORT, fp="deadbeef0000") is False,
+      "指纹不一致时 _server_alive 为 False（不会误开旧副本页面）")
+check(server._server_alive(PORT) is True, "指纹一致时 _server_alive 为 True")
+
 SRV.shutdown()
 shutil.rmtree(TMP, ignore_errors=True)
 print(f"\n{'='*46}\n通过 {PASSED} 项，失败 {FAILED} 项\n{'='*46}")

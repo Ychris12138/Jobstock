@@ -1,12 +1,16 @@
 # Changelog
 
-## [Unreleased]
+## [0.1.1] — 2026-09-15
 
 ### Fixed
+- **误开其它副本的旧界面**：单实例探测原先只看「端口上 `/api/jobs` 是否 200」，机器上另一份 job-stock 副本（旧品牌 UI）也会被当成自己，双击启动就打开错页面。现在 `/api/jobs` 返回 `install_fp`（工具根目录指纹），`_server_alive` 必须指纹一致才认为「已在运行」
 - **Windows `start.bat` 双击启动**：cmd 按系统 OEM 代码页分块解析 bat，UTF-8 中文行可能被从中间劈开当成命令执行（乱码报错）；脚本改为纯 ASCII（中文文案留在 Python 侧），并用 `.gitattributes` 钉死 `*.bat` CRLF、`*.command` LF
 - **首次启动**：`start.bat` 在没有 `config.json` 时自动先跑 `install.py`，不再直接报「数据目录不存在」
 - **Windows 端口影子化**：`SO_REUSEADDR` 在 Windows 上允许重复 bind 同一端口，后启动的实例「bind 成功但永远收不到连接」；`pick_port` 先用不开 REUSEADDR 的裸 socket 探测，端口自动避让与 `--port` 占用报错在 Windows 恢复正确（§34 回归测试）
 - **`install.py`**：非 UTF-8 locale 的 Windows 重定向输出时打印「⇩」等字符抛 `UnicodeEncodeError`（与 server.py 同一 reconfigure 处理）
+
+### Changed
+- 截止提醒条改为浅琥珀样式；README 加入真实界面截图（`assets/docs/`）
 
 ## [0.1.0] — 2026-09-15
 
