@@ -31,13 +31,14 @@ cv/                  CV 原文 + <名字>.reading.md 解读文件（格式见 cv
 |---|---|---|---|
 | 工作地点 | `locations[]` | 自由，多值 | 选「上海」能筛出**所有可在上海**的岗位；多选取 **OR** |
 | 招聘类型 | `recruit_type` | 受控枚举：`校招 / 社招 / 实习` | 单选 |
-| 岗位分类 | `category` | 受控枚举：`算法 / 研究 / 数据 / 量化 / 后端 / Infra / 前端 / 硬件 / 产品 / 其他` | 单选 |
+| 岗位分类 | `category` | 受控枚举，来自 `config.json` 的 `categories`（未配置用默认：产品/算法/研究/数据/量化/后端/前端/Infra/硬件/设计/运营/其他） | 单选 |
 | 主题属性 | `tags[]` | 自由，多值 | 多选取 **AND**（同时具备），如 `AI4S / 2027届 / 分子动力学` |
 
 `locations` 是数组：一个岗位常常多地可选（如「深圳、北京、上海」），单值字段会丢信息。
 列表页把它渲染成彩色 chip，城市与颜色固定对应，方便扫视。
 
-枚举要加值就改 `server.py` 里的 `CATEGORIES` / `RECRUIT_TYPES`，前后端同时生效。
+分类枚举写在 `config.json` 的 `categories`（数组），按你的求职方向定制，前后端同时生效；
+招聘类型改 `server.py` 的 `RECRUIT_TYPES`。未配置分类时用 `server.py` 的 `DEFAULT_CATEGORIES`。
 
 状态枚举：`待投递 / 已投递 / 笔试 / 面试 / Offer / 已拒绝 / 已归档`（只归档，不删除）
 
@@ -149,6 +150,7 @@ cd job-stock && python install.py
 - **数据目录**：岗位 JSON + 个人状态 + sqlite 索引（可以指到仓库外，比如 D 盘）
 - **CV 目录**：CV 原文与解读文件
 - **你的名字**：写进新岗位的 `created_by`，可留空
+- **岗位分类**：逗号分隔，按你的方向定制（如 `AI产品,增长,设计`）
 
 也可以非交互指定：
 
@@ -180,6 +182,17 @@ python install.py --data-dir "D:\jobs-data" --cv-dir "~/Documents/my-cv"
 启动后**自动打开浏览器**（默认 http://localhost:8770 ，不用自己敲地址）。
 端口被占时会自动换到 8771…；**已经有一个实例在跑**时再双击不会报错，只是把页面
 重新打开。关掉终端窗口（或 Ctrl+C）即停止服务。
+
+## 用 AI Agent 自动化（推荐）
+
+WebUI 岗位页顶部有「🚀 用 AI Agent 自动化初始化」卡片（空库或只有示例岗位时常驻）。
+用 **Claude Code / Cursor / MiMo / Codex** 等打开本工具目录，点「复制初始化提示词」发给它：
+
+1. 它会读 README / AGENTS，检查 cv/，必要时生成解读并请你确认关键词与方向
+2. **必须经你同意**后，才按内置全网搜岗提示词多渠道捞岗并写入 `jobs/`
+3. 最后 `python server.py --reindex` 并汇报结果
+
+「CV 与解读」页也有一键复制的：CV 解读提示词、全网搜岗提示词（尽量多匹配、宁多勿漏）。
 
 ## 两种录入招聘信息的方式
 
@@ -251,6 +264,7 @@ python install.py --data-dir "D:\jobs-data" --cv-dir "~/Documents/my-cv"
 | POST | `/api/reindex` | 从 JSON + 本地状态重建索引；响应含 `skipped`（读不出来/id 重复的文件）、`warnings`（日期格式、枚举外的取值）与 `duplicates`（重复岗位组），**不会静默吞掉岗位** |
 | POST | `/api/dedupe` | 合并强信号的重复岗位组（同职位号 / 同投递链接），返回合并了哪些；被合并的在历史版本里留底 |
 | GET | `/api/cv` | CV 原文件列表 + 解读文件（含解析出的关键词）+ 解读提示词 |
+| GET | `/api/prompts` | 三套内置提示词（初始化 / 全网搜岗 / CV 解读）+ 当前分类与状态枚举 |
 
 > 想要表格/CSV 形态的数据？索引库本来就是标准 sqlite，一行命令导出，无需任何功能开发：
 > `sqlite3 -header -csv data/jobs.db "SELECT company, position, url, deadline FROM jobs" > jobs.csv`

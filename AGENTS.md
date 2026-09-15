@@ -57,8 +57,9 @@ jobs_lock() → 进程内 RLock → `.status.lock`。新增写接口或改写路
 - **必填**：`id`、`company`、`position`。id 规则：有官方职位号用 `<公司>-<职位号小写>`，
   没有用 `<公司>-<岗位名>`。**尽量填 `job_no`** —— 这是去重的主要依据。
 - **三个维度各管各的**：城市 → `locations[]`（多值，多地全列）；招聘类型 →
-  `recruit_type`（枚举：校招/社招/实习）；岗位分类 → `category`（受控枚举，见
-  `server.py` 的 `CATEGORIES`）。**不要把城市或招聘类型塞进 `tags`**。
+  `recruit_type`（枚举：校招/社招/实习）；岗位分类 → `category`（受控枚举，默认见
+  `server.py` 的 `DEFAULT_CATEGORIES`，可用 `config.json` 的 `categories` 覆盖）。
+  **不要把城市或招聘类型塞进 `tags`**。
 - **取值复用**：所有维度字段都是筛选依据。新增前先查已有取值（`GET /api/jobs`
   的 `facets`，或扫 `jobs/*.json`），同类岗位复用已有写法；新方向才引入新值，
   命名保持简洁、无空格、无标点。

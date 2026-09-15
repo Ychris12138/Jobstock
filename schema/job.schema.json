@@ -15,7 +15,7 @@
     "job_no":   { "type": "string", "description": "官方职位号，如 A212198A" },
     "category": {
       "type": "string",
-      "description": "岗位一级分类，受控枚举（枚举外的值保留并告警）：算法 / 研究 / 数据 / 量化 / 后端 / Infra / 前端 / 硬件 / 产品 / 其他"
+      "description": "岗位一级分类，受控枚举（枚举外的值保留并告警）。取值来自 config.json 的 categories；未配置时见 server.py 的 DEFAULT_CATEGORIES（产品/算法/研究/数据/量化/后端/前端/Infra/硬件/设计/运营/其他）。"
     },
     "recruit_type": {
       "type": "string",

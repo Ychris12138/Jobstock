@@ -213,15 +213,38 @@ def _resolve(p):
     return p if p.is_absolute() else (ROOT / p).resolve()
 
 
+def _read_config():
+    if not CONFIG_PATH.exists():
+        return {}
+    try:
+        cfg = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
+        return cfg if isinstance(cfg, dict) else {}
+    except Exception:
+        return {}
+
+
+def _load_categories(cfg):
+    """岗位分类：config.json 的 categories 优先；没有则用默认列表。
+
+    不写死在代码里的原因：不同求职方向的分类完全不同（算法/量化 vs 产品/运营）。
+    枚举外的存量值仍会保留并告警 —— 只是录入下拉与校验跟 config 走。
+    """
+    raw = cfg.get("categories")
+    if isinstance(raw, (list, tuple)):
+        out = []
+        for c in raw:
+            t = norm_text(c)
+            if t and t not in out:
+                out.append(t)
+        if out:
+            return out
+    return list(DEFAULT_CATEGORIES)
+
+
 def configure(data_dir=None, cv_dir=None):
-    """应用数据/CV 目录配置。优先级：CLI 参数 > config.json > 默认（仓库内）。"""
-    global JOBS_DIR, LOCAL_DIR, CV_DIR, DB_PATH
-    cfg = {}
-    if CONFIG_PATH.exists():
-        try:
-            cfg = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
-        except Exception:
-            pass
+    """应用数据/CV 目录与分类配置。优先级：CLI 参数 > config.json > 默认（仓库内）。"""
+    global JOBS_DIR, LOCAL_DIR, CV_DIR, DB_PATH, CATEGORIES
+    cfg = _read_config()
     dd = data_dir or cfg.get("data_dir")
     cd = cv_dir or cfg.get("cv_dir")
     base = _resolve(dd) if dd else ROOT
@@ -229,6 +252,7 @@ def configure(data_dir=None, cv_dir=None):
     LOCAL_DIR = base / "local"
     DB_PATH = base / "data" / "jobs.db"
     CV_DIR = _resolve(cd) if cd else ROOT / "cv"
+    CATEGORIES = _load_categories(cfg)
 
 
 STATUSES = ["待投递", "已投递", "笔试", "面试", "Offer", "已拒绝", "已归档"]
@@ -236,9 +260,12 @@ STATUSES = ["待投递", "已投递", "笔试", "面试", "Offer", "已拒绝", 
 # 那会让「已拒绝」排在「Offer」之后；归档不代表进度，权重最低。
 STATUS_RANK = {"已归档": -1, "待投递": 0, "已投递": 1, "笔试": 2, "面试": 3, "Offer": 4, "已拒绝": 4}
 
-# 岗位一级分类：受控枚举，用于粗粒度筛选。要加新方向就改这个列表，前后端同时生效。
-# 注意：枚举外的存量值不会被清掉，前端会把它当成临时选项显示出来。
-CATEGORIES = ["算法", "研究", "数据", "量化", "后端", "Infra", "前端", "硬件", "产品", "其他"]
+# 岗位一级分类：受控枚举，用于粗粒度筛选。
+# 真正生效的列表来自 config.json 的 categories（见 _load_categories / configure）。
+# 这里只是未配置时的兜底；枚举外的存量值不会被清掉，前端会当成临时选项显示。
+DEFAULT_CATEGORIES = ["产品", "算法", "研究", "数据", "量化", "后端", "前端", "Infra",
+                      "硬件", "设计", "运营", "其他"]
+CATEGORIES = list(DEFAULT_CATEGORIES)
 
 # 招聘类型：独立成一个维度，不要混进 tags —— 「校招」和「AI4S」不是同一类东西
 RECRUIT_TYPES = ["校招", "社招", "实习"]
@@ -328,6 +355,102 @@ CV_PROMPT = """请阅读我提供的 CV，生成一份「CV 解读文件」，�
 （什么样的岗位值得投，什么样的直接跳过）
 
 要求：只写 CV 里有据可查的内容，不要虚构。"""
+
+# 全网搜岗：基于 CV 解读尽量捞全，宁多勿漏；去重与格式化交给 jobs/ 写入规范。
+JOB_SEARCH_PROMPT = """你是 job-stock 的职位猎手。请基于本仓库 cv/*.reading.md（若无则先要 CV 并生成解读），
+做一轮**尽可能全面**的全网职位搜索，把匹配岗位写入 jobs/*.json。
+
+## 目标
+宁可多捞再筛，不要只给「最像的 5 个」。每个目标方向至少覆盖多渠道、多关键词组合。
+
+## 第一步：读懂求职者
+1. 读 cv/*.reading.md 全部内容，提取：
+   - 目标方向（按优先级）
+   - 核心技能与可迁移经验
+   - 城市 / 远程 / 招聘类型（校招/社招/实习）偏好
+   - 硬伤（避免推明显过不了的岗）
+   - 10 个匹配关键词
+2. 扫一眼 jobs/*.json 里已有的 company + position + job_no，建立防重清单。
+
+## 第二步：多渠道广搜（并行/分批，尽量穷尽）
+对每个目标方向，用不同关键词组合多轮搜索，渠道包括但不限于：
+- 目标公司官网招聘站（大厂 / 独角兽 / 垂直领域公司 careers 页）
+- 综合招聘与社区：牛客、Boss 直聘、猎聘、实习僧、LinkedIn、拉勾
+- 校招/社招专题页、提前批公告、公众号/行业媒体转载的 HC 信息
+- 搜索引擎宽搜：`岗位关键词 + 城市 + 校招|社招|实习`、`公司名 + AI|AIGC|产品 等方向词`
+
+关键词策略（举例，按 CV 方向替换）：
+- 方向本体 + 岗位族：如「AIGC 产品经理」「AI 产品」「创作工具产品」
+- 场景词：电商素材、生图、Agent、Coding、设计工具、商家后台…
+- 公司清单：把 CV 匹配建议里「值得投」的公司名逐个搜一遍
+- 变体：全称/简称、中英文、带不带「工程师/经理/实习」
+
+宽进：只要沾边就先记下；严出放在下一步。
+
+## 第三步：过滤与分级
+跳过：明确要求多年经验且 CV 硬伤对不上、纯算法/工程岗而 CV 无工程背景、
+城市完全不可接受且无远程。
+保留并标注优先级：P0 高度对口 / P1 可迁移 / P2 长期目标或需内推。
+
+## 第四步：按 job-stock 规范落盘
+每条岗位一个 JSON 文件 jobs/<id>.json，遵守 schema 与 AGENTS.md：
+- 必填：id / company / position；尽量填 job_no
+- city → locations[]；招聘类型 → recruit_type；分类 → category（用 config.json 的 categories）
+- url 给可投递或详情页；jd 尽量粘贴原文快照；notes 写客观情报（入口、门槛、截止）
+- **不要**写 status / my_notes / history（那是个人层）
+- id 规则：有职位号用 `<公司>-<职位号小写>`，否则 `<公司>-<岗位名>`
+- 与已有岗位疑似重复时：有 job_no 就更新原文件；没有则对比 url/公司+岗位名，避免平行两份
+
+## 第五步：重建与汇报
+1. 运行 `python server.py --reindex`，检查 skipped / warnings / duplicates
+2. 向用户汇报：新增 N 条、按方向分布、Top 匹配岗位、建议优先投递清单
+3. 提醒用户到 WebUI 看匹配度，个人投递状态自己在页面上标
+
+禁止编造职位号、薪资、截止日期；搜不到就如实说该渠道无结果。"""
+
+BOOTSTRAP_PROMPT = """你是 job-stock 工具的初始化助手。当前工作目录就是工具根目录。
+
+请按顺序完成初始化，并在每一步向用户确认关键选择：
+
+## 1. 理解工具
+- 读 README.md 与 AGENTS.md，遵守数据分层与「不写个人层字段」等约定
+- 确认 Python 可用；必要时先 `python install.py`（或 python3）
+
+## 2. 配置身份与分类（可选）
+- 若 config.json 为空，可询问用户：
+  - my_name（写入 created_by，可跳过）
+  - categories：按其求职方向定制分类列表（如 产品/算法/设计/运营），写入 config.json
+- 不要替用户填真实姓名以外的隐私
+
+## 3. 收集并解读 CV
+- 检查 cv/ 目录是否已有 CV 原文（pdf/md/docx）
+- 没有则向用户索要，保存到 cv/
+- 若已有 CV 但没有 *.reading.md：使用工具内置 CV 解读提示词生成解读，
+  保存为 cv/<名字>.reading.md，**把关键词与目标方向读给用户确认**后再继续
+
+## 4. 询问是否开始第一轮全网搜岗
+必须明确问用户：
+「是否根据 CV 解读结果开始第一轮全网职位搜索？」
+- 用户拒绝 → 停止，告诉用户之后可在 WebUI「CV 与解读」页复制搜岗提示词再发起
+- 用户同意 → 使用内置 JOB_SEARCH_PROMPT 执行搜索、写入 jobs/、reindex 并汇报
+
+## 5. 收尾
+- 建议用户：`python server.py` 打开 WebUI；数据只在本机，重要节点点「⇩ 全量备份」
+- 若 jobs/ 里只有示例岗位，提醒可删除示例后开始真实录入
+
+全程用中文；涉及删除文件必须再次征得用户同意。"""
+
+
+def prompts_payload():
+    """前端「复制提示词」用的三件套。分类列表一并返回，方便 UI 展示当前枚举。"""
+    return {
+        "cv_prompt": CV_PROMPT,
+        "job_search_prompt": JOB_SEARCH_PROMPT,
+        "bootstrap_prompt": BOOTSTRAP_PROMPT,
+        "categories": list(CATEGORIES),
+        "statuses": list(STATUSES),
+        "recruit_types": list(RECRUIT_TYPES),
+    }
 
 
 # ---------------------------------------------------------------- 归一化工具
@@ -1640,6 +1763,8 @@ class Handler(BaseHTTPRequestHandler):
             merged["match_kw"] = match_keywords(merged, kws)
             merged["cv_keywords"] = kws
             return self.send_json(merged)
+        if path == "/api/prompts":
+            return self.send_json(prompts_payload())
         if path == "/api/cv":
             CV_DIR.mkdir(parents=True, exist_ok=True)
             originals, readings = [], []

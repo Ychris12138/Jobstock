@@ -979,6 +979,45 @@ check(bool(m29) and m29[0]["keep"] != "署名甲", "信息更全的后录者成�
 _, kept29 = req("GET", "/api/jobs/" + U(m29[0]["keep"]))
 check(kept29.get("created_by") == "甲", "合并后 created_by 取先录入的人（而非机械保留幸存者的）")
 
+# ---- 30. 内置提示词 + config 分类 ------------------------------------------------
+print("\n【30】内置提示词 + config 分类")
+code, p30 = req("GET", "/api/prompts")
+check(code == 200 and isinstance(p30.get("cv_prompt"), str) and "reading.md" in p30["cv_prompt"],
+      "/api/prompts 返回 CV 解读提示词")
+check("尽可能" in p30.get("job_search_prompt", "") or "穷尽" in p30.get("job_search_prompt", "")
+      or "宁" in p30.get("job_search_prompt", ""),
+      "全网搜岗提示词强调尽量捞全")
+check("初始化" in p30.get("bootstrap_prompt", "") and "第一轮" in p30.get("bootstrap_prompt", ""),
+      "初始化提示词含 agent 自动化与首轮搜岗确认")
+check("产品" in p30.get("categories") and "算法" in p30.get("categories"),
+      "prompts 接口带回当前分类枚举")
+
+# config.json 自定义分类：configure 后生效。把 CONFIG_PATH 指到临时文件，
+# 避免测试写坏仓库里真实的 config.json。
+real_cfg_path = server.CONFIG_PATH
+cfg_path = TMP / "config.json"
+try:
+    server.CONFIG_PATH = cfg_path
+    cfg_path.write_text(json.dumps({"categories": ["AI产品", "增长", "设计"]},
+                                   ensure_ascii=False), encoding="utf-8")
+    server.configure(data_dir=str(TMP), cv_dir=str(TMP / "cv"))
+    check(server.CATEGORIES == ["AI产品", "增长", "设计"],
+          "config.json 的 categories 覆盖默认分类")
+    code, bad = req("POST", "/api/jobs", {"company": "C", "position": "P", "category": "算法"})
+    check(code == 400, "自定义分类后，默认枚举外的旧分类被拒绝")
+    code, ok = req("POST", "/api/jobs", {"company": "C2", "position": "P2", "category": "AI产品"})
+    check(code == 200, "自定义分类可录入")
+    code, pj = req("GET", "/api/jobs")
+    check("AI产品" in pj.get("categories", []), "列表接口返回自定义分类")
+    cfg_path.write_text("{}", encoding="utf-8")
+    server.configure(data_dir=str(TMP), cv_dir=str(TMP / "cv"))
+    check(server.CATEGORIES == list(server.DEFAULT_CATEGORIES),
+          "空 config 时分类回到默认列表")
+finally:
+    server.CONFIG_PATH = real_cfg_path
+    cfg_path.unlink(missing_ok=True)
+    server.configure(data_dir=str(TMP), cv_dir=str(TMP / "cv"))
+
 SRV.shutdown()
 shutil.rmtree(TMP, ignore_errors=True)
 print(f"\n{'='*46}\n通过 {PASSED} 项，失败 {FAILED} 项\n{'='*46}")

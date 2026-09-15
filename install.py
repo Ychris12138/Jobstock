@@ -67,6 +67,16 @@ def main():
                    f"{cur_name or '跳过，不署名'})：")
         if name:
             old["my_name"] = name
+        cur_cats = old.get("categories")
+        if isinstance(cur_cats, list) and cur_cats:
+            cur_cat_s = "、".join(cur_cats)
+        else:
+            cur_cat_s = "产品、算法、研究、数据、后端、前端、Infra、硬件、设计、运营、其他"
+        cats_raw = ask(f"岗位分类（逗号分隔，按你的求职方向定制；回车 = {cur_cat_s}）：")
+        if cats_raw:
+            cats = [c.strip() for c in cats_raw.replace("，", ",").split(",") if c.strip()]
+            if cats:
+                old["categories"] = cats
     else:
         data_dir = data_dir or old.get("data_dir")
         cv_dir = cv_dir or old.get("cv_dir")
@@ -74,6 +84,8 @@ def main():
     cfg = {}
     if old.get("my_name"):
         cfg["my_name"] = old["my_name"]
+    if isinstance(old.get("categories"), list) and old["categories"]:
+        cfg["categories"] = old["categories"]
     if data_dir:
         cfg["data_dir"] = data_dir
     if cv_dir:
