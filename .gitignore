@@ -29,7 +29,7 @@ data-backup-*/
 *.tmp
 .DS_Store
 
-# 本地工具/截图噪音，不进仓库
+# 本地工具/临时截图噪音，不进仓库
 .playwright-cli/
 assets/screenshots/
 assets/*.png
@@ -37,3 +37,6 @@ assets/*.html
 assets/*.md
 edited-*.png
 generated-*.png
+
+# README 展示用的正式截图（要进 git）
+!assets/docs/
