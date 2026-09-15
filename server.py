@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""job-stock 服务器：纯 Python 标准库，零依赖的本地求职管理工具。
+"""Jobstock 服务器：纯 Python 标准库，零依赖的本地求职管理工具。
 
 用法：
     python server.py [--port 8770]     # 启动 WebUI（默认自动打开浏览器）
@@ -40,7 +40,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent
 CONFIG_PATH = ROOT / "config.json"
 WEB_DIR = ROOT / "web"
-SERVER_VERSION = "0.0.1"   # 随功能性改动一起更新；前端用它检测「网页新、后台旧」
+SERVER_VERSION = "0.1.0"   # 随功能性改动一起更新；前端用它检测「网页新、后台旧」
 
 _my_name_cache = {"n": None, "done": False}
 
@@ -453,6 +453,32 @@ def prompts_payload():
     }
 
 
+def save_categories(raw_list):
+    """把用户在「使用指南」里编辑的分类写进 config.json 并热更新 CATEGORIES。
+
+    只接受字符串列表；空列表视为「恢复默认」。返回规范化后的列表。
+    """
+    global CATEGORIES
+    if not isinstance(raw_list, (list, tuple)):
+        raise ValueError("categories 必须是字符串数组")
+    out = []
+    for c in raw_list:
+        t = norm_text(c)
+        if t and t not in out:
+            out.append(t)
+    if not out:
+        out = list(DEFAULT_CATEGORIES)
+    cfg = _read_config()
+    if out == list(DEFAULT_CATEGORIES):
+        cfg.pop("categories", None)   # 与默认一致就不落盘，少一行噪音
+    else:
+        cfg["categories"] = out
+    CONFIG_PATH.write_text(json.dumps(cfg, ensure_ascii=False, indent=2) + "\n",
+                           encoding="utf-8")
+    CATEGORIES = _load_categories(cfg)
+    return list(CATEGORIES)
+
+
 # ---------------------------------------------------------------- 归一化工具
 
 def norm_text(v):
@@ -703,6 +729,32 @@ def write_json_atomic(path, data):
 
 # ---------------------------------------------------------------- 岗位层：JSON 文件
 
+def _reject_path_name(name):
+    """单段路径名是否明显非法：空、`.`/`..`、含分隔符或盘符（Windows `C:`）。"""
+    n = norm_text(name)
+    if not n or n in (".", ".."):
+        return True
+    if "/" in n or "\\" in n or ":" in n or "\x00" in n:
+        return True
+    return False
+
+
+def safe_under(base, name):
+    """把 name 限制为 base 的直接子文件/子目录；越界或异常返回 None。
+
+    不只检查字符串里的 `../`：resolve 之后再比 parent，Windows 的 `..\\`
+    与混合分隔符在 Path 规范化后同样拦得住。
+    """
+    if _reject_path_name(name):
+        return None
+    try:
+        base_r = Path(base).resolve()
+        p = (base_r / norm_text(name)).resolve()
+    except (OSError, ValueError):
+        return None
+    return p if p.parent == base_r else None
+
+
 def job_path(job_id):
     """由 id 推出 JSON 路径；任何越界写法（路径穿越）返回 None。"""
     jid = norm_text(job_id)
@@ -766,7 +818,24 @@ VERSION_RE = re.compile(r"^v-(\d{8})-(\d{6})-(\d{6})\.json$")
 
 
 def history_dir(job_id):
-    return JOBS_DIR / HISTORY_DIR / norm_text(job_id)
+    """岗位历史目录；非法 / 穿越 id 返回 None（与 job_path 同一安全边界）。"""
+    jid = norm_text(job_id)
+    if _reject_path_name(jid):
+        return None
+    try:
+        base = (JOBS_DIR / HISTORY_DIR).resolve()
+        p = (base / jid).resolve()
+    except (OSError, ValueError):
+        return None
+    return p if p.parent == base else None
+
+
+def history_version_file(job_id, fname):
+    """历史版本文件路径；非法 id / 非法文件名 / 越界返回 None。"""
+    hdir = history_dir(job_id)
+    if not hdir or not VERSION_RE.match(norm_text(fname)):
+        return None
+    return safe_under(hdir, fname)
 
 
 def snapshot_version(job_id, src):
@@ -777,6 +846,9 @@ def snapshot_version(job_id, src):
     """
     try:
         hdir = history_dir(job_id)
+        if not hdir:
+            print(f"⚠️ 岗位历史版本保存失败（id 非法，跳过）：{job_id!r}", file=sys.stderr)
+            return
         hdir.mkdir(parents=True, exist_ok=True)
         n = datetime.now()
         dst = hdir / f"v-{n.strftime('%Y%m%d-%H%M%S-%f')}.json"
@@ -794,9 +866,11 @@ def snapshot_version(job_id, src):
 def version_files(job_id):
     """某岗位的历史版本文件，新→旧。id 不合法或没有历史返回 []。"""
     hdir = history_dir(job_id)
-    if not norm_text(job_id) or not hdir.is_dir():
+    if not hdir or not hdir.is_dir():
         return []
-    return sorted((f for f in hdir.iterdir() if VERSION_RE.match(f.name)), reverse=True)
+    return sorted((f for f in hdir.iterdir()
+                   if f.is_file() and not f.is_symlink() and VERSION_RE.match(f.name)),
+                  reverse=True)
 
 
 def version_meta(f):
@@ -1536,11 +1610,18 @@ class Handler(BaseHTTPRequestHandler):
         pass
 
     # ---- helpers ----
+    # 本机个人数据响应：禁缓存 + 基础安全头。集中在这里加一次，避免每个路由手写。
+    def _sec_headers(self):
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("Referrer-Policy", "no-referrer")
+
     def send_json(self, data, code=200):
         body = json.dumps(data, ensure_ascii=False).encode("utf-8")
         self.send_response(code)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
+        self._sec_headers()
         self.end_headers()
         self.wfile.write(body)
 
@@ -1599,6 +1680,7 @@ class Handler(BaseHTTPRequestHandler):
         self.send_response(200)
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(body)))
+        self._sec_headers()
         self.end_headers()
         self.wfile.write(body)
 
@@ -1615,8 +1697,18 @@ class Handler(BaseHTTPRequestHandler):
             for base, name in ((JOBS_DIR, "jobs"), (LOCAL_DIR, "local")):
                 if not base.is_dir():
                     continue
+                try:
+                    base_r = base.resolve()
+                except OSError:
+                    continue
                 for f in sorted(base.rglob("*")):
-                    if not f.is_file():
+                    # 跳过 symlink 与 resolve 后越界的路径，避免把目录外文件打进备份
+                    try:
+                        if not f.is_file() or f.is_symlink():
+                            continue
+                        rf = f.resolve()
+                        rf.relative_to(base_r)
+                    except (OSError, ValueError):
                         continue
                     # 根目录下的锁文件（.jobs.lock 等）跳过；
                     # .history/ 子目录里的历史版本要带上（备份的意义就在这）
@@ -1629,14 +1721,15 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", "application/zip")
         self.send_header("Content-Disposition", f'attachment; filename="{fname}"')
         self.send_header("Content-Length", str(len(body)))
+        self._sec_headers()
         self.end_headers()
         self.wfile.write(body)
 
     def restore_version(self, job_id, fname):
         """把某个历史版本恢复为当前内容（当前内容会先留一份新历史）。"""
         job_id = norm_text(job_id)
-        f = history_dir(job_id) / fname
-        if not VERSION_RE.match(fname) or not f.is_file():
+        f = history_version_file(job_id, fname)
+        if not f or not f.is_file():
             return self.send_json({"error": "not found"}, 404)
         d = load_json(f)
         if not isinstance(d, dict):
@@ -1738,8 +1831,8 @@ class Handler(BaseHTTPRequestHandler):
                                                 for f in version_files(m.group(1))]})
         m = re.fullmatch(r"/api/jobs/([^/]+)/versions/([^/]+)", path)
         if m:
-            f = history_dir(m.group(1)) / m.group(2)
-            if not VERSION_RE.match(m.group(2)) or not f.is_file():
+            f = history_version_file(m.group(1), m.group(2))
+            if not f or not f.is_file():
                 return self.send_json({"error": "not found"}, 404)
             d = load_json(f)
             if not isinstance(d, dict):
@@ -1798,6 +1891,13 @@ class Handler(BaseHTTPRequestHandler):
             migrate()
             migrate_ids()
             return self.send_json({"ok": True, **reindex()})
+        if path == "/api/config/categories":
+            body = self.read_body()
+            try:
+                cats = save_categories(body.get("categories"))
+            except ValueError as e:
+                raise BadRequest(str(e)) from e
+            return self.send_json({"ok": True, "categories": cats})
         m = re.fullmatch(r"/api/jobs/([^/]+)/versions/([^/]+)/restore", path)
         if m:
             return self.restore_version(m.group(1), m.group(2))

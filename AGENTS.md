@@ -1,7 +1,7 @@
-# AGENTS.md —— job-stock AI 协作协议
+# AGENTS.md —— Jobstock AI 协作协议
 
 > 任何 AI agent 进入本目录工作前，**先读本文件**。
-> job-stock 是零依赖的**本地求职管理工具**：招聘信息与投递进度都只存在本机，
+> Jobstock 是零依赖的**本地求职管理工具**：招聘信息与投递进度都只存在本机，
 > 不用 git 同步、不联网。纯 Python 标准库后端 + 原生 JS 前端，无 npm、无构建，
 > Windows / macOS 通用。
 > 用户可读的完整文档在 `README.md`，本文件只写 agent 必须遵守的部分。

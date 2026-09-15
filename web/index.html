@@ -163,15 +163,6 @@
   .warn { background: #fff8e6; border: 1.5px solid #f0d78c; color: #8a6d1f; border-radius: 14px;
           padding: 12px 16px; margin-bottom: 14px; font-size: 14px; white-space: pre-wrap; }
 
-  /* 初始化引导：空库或只有示例时最显眼；用 agent 打开本目录可一键自动化 */
-  .boot { background: linear-gradient(135deg, #eef4ff, #f7f3ff); border: 1.5px solid #c9d6f5;
-          border-radius: 16px; padding: 16px 18px; margin-bottom: 14px; }
-  .boot h3 { margin: 0 0 8px; font-size: 16px; }
-  .boot p { margin: 6px 0; font-size: 14px; color: #3d4660; line-height: 1.55; }
-  .boot .row { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; align-items: center; }
-  .boot[hidden] { display: none !important; }
-  .agents { font-size: 13px; color: var(--muted); }
-
   /* 截止提醒条。它统计的是全部岗位，不跟着筛选走 —— 筛到「深圳」时也该提醒
      北京那个明天截止的，否则随手一筛提醒就没了，等于没有。 */
   .due { background: #fff4f4; border: 1.5px solid #ffc9c9; color: #b02525; border-radius: 14px;
@@ -248,25 +239,13 @@
   <nav>
     <button id="tab-jobs" class="active" onclick="showTab('jobs')">岗位列表</button>
     <button id="tab-cv" onclick="showTab('cv')">CV 与解读</button>
+    <button id="tab-guide" onclick="showTab('guide')">使用指南</button>
   </nav>
   <span class="header-spacer"></span>
   <span class="header-meta">零依赖 · 可回退 · 可备份</span>
 </header>
 <main>
   <section id="page-jobs">
-    <div id="boot" class="boot" hidden>
-      <h3>🚀 用 AI Agent 自动化初始化</h3>
-      <p>用 <b>Claude Code / Cursor / MiMo / Codex</b> 等 agent 打开本工具目录，
-        复制下面的初始化提示词发给它：自动读懂工具、收集并解读 CV，
-        并在你确认后发起第一轮全网搜岗。</p>
-      <p class="agents">分类当前使用 config.json 的 <code>categories</code>（未配置则用默认列表）。
-        可在初始化时定制，或之后手改 config.json 再重启。</p>
-      <div class="row">
-        <button class="btn" onclick="copyBootstrapPrompt()">复制初始化提示词</button>
-        <button class="btn ghost small" onclick="dismissBoot()">本次不再显示</button>
-        <span class="muted" id="boot-cats"></span>
-      </div>
-    </div>
     <div id="due" class="due" hidden></div>
     <div id="notice" class="warn" hidden></div>
     <div class="toolbar">
@@ -341,6 +320,61 @@
       <button class="btn ghost small" onclick="copyText('job-search-prompt')">复制搜岗提示词</button>
       <pre class="prompt" id="job-search-prompt"></pre>
     </details>
+  </section>
+
+  <section id="page-guide" hidden>
+    <div class="card">
+      <h3>🚀 三步开始用</h3>
+      <ol style="margin:8px 0 0;padding-left:22px;line-height:1.85">
+        <li>点岗位列表里的 <b>「＋ 新增岗位」</b>，填公司和岗位（尽量填官方职位号）</li>
+        <li>投递后在行内快捷改 <b>状态</b>，或点开写个人备注</li>
+        <li>定期点 <b>「⇩ 全量备份」</b>；换电脑还要单独拷走 <code>cv/</code></li>
+      </ol>
+      <p class="muted" style="margin-top:10px">
+        仓库自带的示例岗位（示例科技 / 虚构云）可直接删除。
+        项目说明见 <a href="https://github.com/Ychris12138/Jobstock" target="_blank" rel="noopener">GitHub README</a>。
+      </p>
+    </div>
+
+    <div class="card">
+      <h3>🤖 让 AI Agent 帮你干活</h3>
+      <p class="muted">用 Claude Code / Cursor / MiMo / Codex 打开本工具目录，复制提示词发给它。
+        初始化会先确认 CV 与方向，<b>经你同意</b>后再搜岗写入 <code>jobs/</code>。</p>
+      <div class="toolbar" style="margin:10px 0">
+        <button class="btn ghost small" onclick="copyGuidePrompt('bootstrap_prompt')">复制初始化提示词</button>
+        <button class="btn ghost small" onclick="copyGuidePrompt('job_search_prompt')">复制搜岗提示词</button>
+        <button class="btn ghost small" onclick="copyGuidePrompt('cv_prompt')">复制 CV 解读提示词</button>
+      </div>
+      <p class="agents muted" style="font-size:13px">
+        Jobstock 本身不上传 CV / 岗位 / 投递状态；若把 CV 交给外部 Agent，
+        数据如何处理取决于你所用的 Agent / 模型服务。
+      </p>
+    </div>
+
+    <div class="card">
+      <h3>🏷️ 岗位分类（按你的方向定制）</h3>
+      <p class="muted">逗号分隔，保存后写入本机 <code>config.json</code>，立即生效。
+        枚举外的旧岗位值会保留，只是不再出现在下拉首选里。</p>
+      <div class="toolbar" style="margin:10px 0">
+        <input id="guide-categories" style="min-width:320px;flex:1"
+               placeholder="例如：AI产品,算法,设计,运营,其他">
+        <button class="btn small" onclick="saveCategories()">保存分类</button>
+      </div>
+      <div id="guide-cat-now" class="muted"></div>
+    </div>
+
+    <div class="card">
+      <h3>📦 数据放在哪</h3>
+      <table style="width:100%;border-collapse:collapse;font-size:14px">
+        <tr><td style="padding:6px 0"><code>jobs/</code></td><td>岗位信息（Agent 可批量维护）</td></tr>
+        <tr><td style="padding:6px 0"><code>local/</code></td><td>你的投递状态与备注（只在本机）</td></tr>
+        <tr><td style="padding:6px 0"><code>cv/</code></td><td>简历与解读（备份 zip 故意不含）</td></tr>
+        <tr><td style="padding:6px 0"><code>config.json</code></td><td>数据目录、分类、署名</td></tr>
+      </table>
+      <p class="muted" style="margin-top:10px">
+        记住：<b>岗位下架</b>是客观事实（closed）；<b>已归档</b>是你自己不投了。两者不要混用。
+      </p>
+    </div>
   </section>
 </main>
 
@@ -472,9 +506,12 @@ async function api(path, opts) {
 function showTab(t) {
   document.getElementById('page-jobs').hidden = t !== 'jobs';
   document.getElementById('page-cv').hidden = t !== 'cv';
+  document.getElementById('page-guide').hidden = t !== 'guide';
   document.getElementById('tab-jobs').classList.toggle('active', t === 'jobs');
   document.getElementById('tab-cv').classList.toggle('active', t === 'cv');
+  document.getElementById('tab-guide').classList.toggle('active', t === 'guide');
   if (t === 'cv') loadCV();
+  if (t === 'guide') loadGuide();
 }
 
 // 转义 HTML 特殊字符。单引号也要转 —— 状态值可能来自手改的文件
@@ -704,8 +741,22 @@ async function loadJobs() {
     '官网', '牛客', '内推', 'Boss直聘', '实习僧', '猎头'])]);
   document.getElementById('count').textContent = `共 ${d.jobs.length} 条`;
   checkServerVersion(d.server_version);
-  updateBootVisibility(d.jobs);
 
+  // 空库 vs 筛选无结果：文案要能引导下一步，而不是一句「没有符合条件」
+  const hasFilter = FILTERS.some(([id]) => document.getElementById(id).value.trim())
+    || selectedTags.size > 0
+    || !document.getElementById('f-archived').checked
+    || !document.getElementById('f-closed').checked;
+  let emptyHtml;
+  if (!d.jobs.length && !hasFilter) {
+    emptyHtml = `<div class="empty">还没有岗位。<br>
+      点「＋ 新增岗位」，或用「CV 与解读」页的搜岗提示词让 AI 帮你写入。</div>`;
+  } else if (!d.jobs.length) {
+    emptyHtml = `<div class="empty">没有符合条件的岗位。
+      试试「清空」筛选，或点「＋ 新增岗位」。</div>`;
+  } else {
+    emptyHtml = '';
+  }
   document.getElementById('rows').innerHTML = d.jobs.map(j => `
     <tr class="${j.closed ? 'closed' : ''}" onclick="openEdit('${encodeURIComponent(j.id)}')">
       <td><strong>${esc(j.company)}</strong>${safeUrl(j.url)
@@ -731,7 +782,7 @@ async function loadJobs() {
           ${d.statuses.map(s => `<option ${s === j.status ? 'disabled' : ''}>${esc(s)}</option>`).join('')}
         </select>
       </td>
-    </tr>`).join('') || '<tr><td colspan="10"><div class="empty">没有符合条件的岗位</div></td></tr>';
+    </tr>`).join('') || `<tr><td colspan="10">${emptyHtml}</td></tr>`;
 }
 
 async function quickStatus(id, status) {
@@ -1007,7 +1058,7 @@ async function loadCV() {
     </div>`).join('');
 }
 
-/* ---- 提示词 / 初始化引导 ---- */
+/* ---- 提示词 ---- */
 
 async function loadPrompts() {
   try {
@@ -1019,37 +1070,43 @@ async function loadPrompts() {
       PROMPTS.cv_prompt = d.prompt || '';
     } catch (__) { /* 离线或未启动时静默 */ }
   }
-  const boot = document.getElementById('boot-cats');
-  if (boot && PROMPTS.categories) boot.textContent = '当前分类：' + PROMPTS.categories.join('、');
-  updateBootVisibility();
-}
-
-function isDemoOnly(jobs) {
-  if (!jobs.length) return true;
-  const demo = new Set(['示例科技', '虚构云']);
-  return jobs.every(j => demo.has(j.company));
-}
-
-function updateBootVisibility(jobs) {
-  const box = document.getElementById('boot');
-  if (!box) return;
-  if (sessionStorage.getItem('boot-dismissed') === '1') { box.hidden = true; return; }
-  // 只有传入 jobs 时按数据判断；否则（首次加载提示词后）先显示，等列表回来再决定
-  if (jobs) box.hidden = !isDemoOnly(jobs);
-  else box.hidden = !!sessionStorage.getItem('boot-dismissed');
-}
-
-function dismissBoot() {
-  sessionStorage.setItem('boot-dismissed', '1');
-  document.getElementById('boot').hidden = true;
-}
-
-function copyBootstrapPrompt() {
-  copyTextContent(PROMPTS.bootstrap_prompt || '（server 未提供初始化提示词，请升级后重试）');
 }
 
 function copyText(id) {
   copyTextContent(document.getElementById(id).textContent);
+}
+
+async function loadGuide() {
+  if (!PROMPTS.categories) await loadPrompts();
+  const cats = PROMPTS.categories || CATEGORIES || [];
+  const box = document.getElementById('guide-cat-now');
+  const input = document.getElementById('guide-categories');
+  if (box) box.textContent = '当前分类：' + (cats.join('、') || '（默认）');
+  if (input && !input.value) input.value = cats.join(',');
+}
+
+function copyGuidePrompt(key) {
+  if (!PROMPTS[key]) {
+    loadPrompts().then(() => copyTextContent(PROMPTS[key] || ''));
+    return;
+  }
+  copyTextContent(PROMPTS[key]);
+}
+
+async function saveCategories() {
+  const raw = document.getElementById('guide-categories').value || '';
+  const categories = raw.split(/[,，、]/).map(s => s.trim()).filter(Boolean);
+  try {
+    const d = await api('/api/config/categories', {body: {categories}});
+    PROMPTS.categories = d.categories;
+    CATEGORIES = d.categories;
+    document.getElementById('guide-cat-now').textContent =
+      '当前分类：' + d.categories.join('、');
+    alert('分类已保存');
+    loadJobs();
+  } catch (e) {
+    alert('保存失败：' + (e && e.message ? e.message : e));
+  }
 }
 
 function copyTextContent(text) {

@@ -1018,6 +1018,130 @@ finally:
     cfg_path.unlink(missing_ok=True)
     server.configure(data_dir=str(TMP), cv_dir=str(TMP / "cv"))
 
+# ---- 31. 历史版本路径穿越（Issue #1）------------------------------------------
+print("\n【31】历史版本路径穿越")
+h_ok = add(company="历史安全公司", position="正常岗")
+# 正常历史：改两次，应能列出
+_, hj = req("GET", f"/api/jobs/{U(h_ok)}")
+req("PUT", f"/api/jobs/{U(h_ok)}", frontend_body(hj, salary="10K"))
+_, hj2 = req("GET", f"/api/jobs/{U(h_ok)}")
+req("PUT", f"/api/jobs/{U(h_ok)}", frontend_body(hj2, salary="20K"))
+code, hv = req("GET", f"/api/jobs/{U(h_ok)}/versions")
+check(code == 200 and len(hv.get("versions", [])) >= 1, "正常中文 id 可列出历史版本")
+if hv.get("versions"):
+    vf = hv["versions"][0]["file"]
+    code, _ = req("GET", f"/api/jobs/{U(h_ok)}/versions/{vf}")
+    check(code == 200, "正常历史版本文件可读取")
+
+for bad_id, label in (
+    ("../x", "父目录段 ../x"),
+    ("..", "单独的 .."),
+    (".", "单独的 ."),
+):
+    check(server.history_dir(bad_id) is None, f"history_dir 拒绝 {label}")
+    check(server.history_version_file(bad_id, "v-20260101-120000-000001.json") is None,
+          f"history_version_file 拒绝非法 id {label}")
+
+# Windows 语义：反斜杠与混合分隔符
+check(server.history_dir("..\\x") is None, "history_dir 拒绝 ..\\x（Windows）")
+check(server.history_dir("foo/bar") is None, "history_dir 拒绝多段路径 foo/bar")
+check(server.history_dir("foo\\bar") is None, "history_dir 拒绝多段路径 foo\\bar")
+check(server.history_dir("C:evil") is None, "history_dir 拒绝盘符形式")
+
+# 合法 id + 非法版本文件名
+good_id = h_ok
+check(server.history_version_file(good_id, "../v-x.json") is None,
+      "版本文件名含 ../ 被拒绝")
+check(server.history_version_file(good_id, "v-20260101-120000-000001.json") is not None
+      or server.history_dir(good_id) is not None,
+      "合法 id 的 helper 不误杀（无历史时 version_file 仍可构造路径或返回 None 均可，但目录应可解析）")
+
+# HTTP 层：URL 编码的穿越
+code, _ = req("GET", f"/api/jobs/{U('../x')}/versions")
+check(code in (200, 404), "URL 中的 ../x 列表不炸服务")
+code, _ = req("GET", "/api/jobs/%2e%2e%2fx/versions")
+check(code in (200, 404), "URL 编码 %2e%2e%2f 不炸服务")
+code, _ = req("GET", f"/api/jobs/{U(h_ok)}/versions/..%2F..%2Fetc")
+check(code in (404, 400), "版本文件名穿越返回 404/400")
+
+# 确认 .history 外没有被写出奇怪文件
+hist_root = TMP / "jobs" / ".history"
+outside = TMP / "pwned.json"
+check(not outside.exists(), "穿越未在数据目录外创建文件")
+
+# ---- 32. 安全响应头与备份 symlink（Issue #2）------------------------------------
+print("\n【32】安全响应头与备份边界")
+
+def raw_headers(method, path):
+    conn = http.client.HTTPConnection("127.0.0.1", PORT, timeout=5)
+    conn.request(method, path)
+    r = conn.getresponse()
+    hdrs = {k.lower(): v for k, v in r.getheaders()}
+    body = r.read()
+    conn.close()
+    return r.status, hdrs, body
+
+st, hdrs, _ = raw_headers("GET", "/api/jobs")
+check(hdrs.get("cache-control") == "no-store", "/api/jobs 带 Cache-Control: no-store")
+check(hdrs.get("x-content-type-options") == "nosniff", "/api/jobs 带 X-Content-Type-Options")
+check(hdrs.get("referrer-policy") == "no-referrer", "/api/jobs 带 Referrer-Policy")
+
+st, hdrs, _ = raw_headers("GET", "/api/cv")
+check(hdrs.get("cache-control") == "no-store", "/api/cv 带 Cache-Control: no-store")
+
+st, hdrs, body = raw_headers("GET", "/api/backup")
+check(st == 200 and hdrs.get("cache-control") == "no-store", "/api/backup 带 no-store")
+
+# 备份：正常文件在 zip 里；symlink 不进包
+import zipfile as _zipfile
+normal = TMP / "jobs" / "备份正常岗.json"
+normal.write_text(json.dumps({"id": "备份正常岗", "company": "备份公司", "position": "岗",
+                              "tags": []}, ensure_ascii=False), encoding="utf-8")
+outside_secret = TMP / "outside-secret.txt"
+outside_secret.write_text("SECRET-OUTSIDE", encoding="utf-8")
+link_path = TMP / "jobs" / "evil-link.json"
+try:
+    if link_path.exists() or link_path.is_symlink():
+        link_path.unlink()
+    os.symlink(outside_secret, link_path)
+    can_symlink = True
+except (OSError, NotImplementedError):
+    can_symlink = False
+    print("  ⚠️ 当前环境无法创建 symlink，跳过 symlink 备份用例")
+
+st, _, zbody = raw_headers("GET", "/api/backup")
+zf = _zipfile.ZipFile(io.BytesIO(zbody))
+names = zf.namelist()
+check(any(n.endswith("备份正常岗.json") for n in names), "备份包含正常岗位文件")
+if can_symlink:
+    leaked = False
+    for n in names:
+        if "evil-link" in n or "outside-secret" in n:
+            leaked = True
+        try:
+            data = zf.read(n)
+            if b"SECRET-OUTSIDE" in data:
+                leaked = True
+        except Exception:
+            pass
+    check(not leaked, "备份不跟随 symlink，也不含目录外内容")
+
+# ---- 33. 使用指南里保存分类 ----------------------------------------------------
+print("\n【33】POST /api/config/categories")
+real_cfg_path = server.CONFIG_PATH
+server.CONFIG_PATH = TMP / "config-guide.json"
+try:
+    code, d = req("POST", "/api/config/categories", {"categories": ["AI产品", "增长", "AI产品"]})
+    check(code == 200 and d.get("categories") == ["AI产品", "增长"],
+          "保存分类去重并返回")
+    check(server.CATEGORIES == ["AI产品", "增长"], "热更新内存中的 CATEGORIES")
+    code, d = req("POST", "/api/config/categories", {"categories": []})
+    check(code == 200 and d.get("categories") == list(server.DEFAULT_CATEGORIES),
+          "空列表恢复默认分类")
+finally:
+    server.CONFIG_PATH = real_cfg_path
+    server.configure(data_dir=str(TMP), cv_dir=str(TMP / "cv"))
+
 SRV.shutdown()
 shutil.rmtree(TMP, ignore_errors=True)
 print(f"\n{'='*46}\n通过 {PASSED} 项，失败 {FAILED} 项\n{'='*46}")

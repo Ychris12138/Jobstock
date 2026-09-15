@@ -28,3 +28,12 @@ data-backup-*/
 # 原子写留下的临时文件
 *.tmp
 .DS_Store
+
+# 本地工具/截图噪音，不进仓库
+.playwright-cli/
+assets/screenshots/
+assets/*.png
+assets/*.html
+assets/*.md
+edited-*.png
+generated-*.png
