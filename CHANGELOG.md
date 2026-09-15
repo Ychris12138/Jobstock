@@ -1,5 +1,12 @@
 # Changelog
 
+## [Unreleased]
+
+### Added
+- **Windows 免安装便携版**（#4）：`scripts/build_windows_portable.py` 可复现构建
+  `Jobstock-v<版本>-Windows-x64.zip`——内置官方 Python 3.12.10 embed-amd64
+  （SHA256 固定校验），解压后双击 `Jobstock.bat` 即用，无需安装 Python / Git
+
 ## [0.1.1] — 2026-09-15
 
 ### Fixed

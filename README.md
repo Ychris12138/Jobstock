@@ -28,9 +28,17 @@
 
 ## 60 秒开始
 
-运行 Jobstock 只需要 **Python 3.8+**。
+### Windows 用户（推荐）
 
-### 方法 A：不会 Git，直接下载 ZIP
+下载 [Releases](https://github.com/Ychris12138/Jobstock/releases) 页面最新的 `Jobstock-v*-Windows-x64.zip`，解压后双击 `Jobstock.bat`。
+
+无需安装 Python、Git、npm 或其他依赖（包内已内置 Python 运行环境）；不写 PATH、不写注册表、不需要管理员权限。首次双击会做一次性初始化（一路回车即可），之后浏览器自动打开。
+
+### 源码版（Windows / macOS 通用）
+
+运行源码版只需要 **Python 3.8+**。
+
+#### 方法 A：不会 Git，直接下载 ZIP
 
 1. 在 GitHub 页面点击 **Code → Download ZIP**
 2. 解压后进入 `Jobstock` 文件夹
@@ -48,7 +56,7 @@ python3 install.py
 
 安装时不知道怎么选，**一路回车即可**。
 
-### 方法 B：会 Git
+#### 方法 B：会 Git
 
 ```bash
 git clone https://github.com/Ychris12138/Jobstock.git

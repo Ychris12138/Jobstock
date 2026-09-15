@@ -25,6 +25,10 @@ cv/*
 # 清空/迁移数据前的整机备份目录
 data-backup-*/
 
+# 便携版构建产物与缓存（scripts/build_windows_portable.py）
+build/
+dist/
+
 # 原子写留下的临时文件
 *.tmp
 .DS_Store

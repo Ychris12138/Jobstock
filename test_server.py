@@ -1176,6 +1176,44 @@ check(server._server_alive(PORT, fp="deadbeef0000") is False,
       "指纹不一致时 _server_alive 为 False（不会误开旧副本页面）")
 check(server._server_alive(PORT) is True, "指纹一致时 _server_alive 为 True")
 
+# ---- 36. 便携版构建脚本 ------------------------------------------------------
+print("\n【36】便携版构建脚本")
+import importlib.util as _ilu
+
+REPO_ROOT = Path(server.__file__).resolve().parent
+_spec = _ilu.spec_from_file_location("build_wp", REPO_ROOT / "scripts" / "build_windows_portable.py")
+bw = _ilu.module_from_spec(_spec)
+_spec.loader.exec_module(bw)
+
+check(bw.app_version() == server.SERVER_VERSION, "构建版本号以 server.py 的 SERVER_VERSION 为唯一来源")
+check(bw.dist_name("0.1.0") == "Jobstock-v0.1.0-Windows-x64", "ZIP 名由版本变量生成")
+
+bat = bw.launcher_bat()
+try:
+    bat.encode("ascii")
+    bat_ascii = True
+except UnicodeEncodeError:
+    bat_ascii = False
+check(bat_ascii, "Jobstock.bat 纯 ASCII（cmd OEM 分块解析会把多字节行劈成命令）")
+check("%~dp0" in bat and "runtime\\python.exe" in bat, "入口用脚本自身目录定位打包内 Python")
+
+staging36 = TMP / "stage36"
+bw.stage_app(staging36)
+check((staging36 / "app" / "server.py").is_file(), "staging 含 app/server.py")
+bw.privacy_scan(staging36)
+check(not list(staging36.rglob("config.json")) and not (staging36 / "app" / "jobs").exists(),
+      "staging 不含 config.json / jobs 数据目录")
+(staging36 / "app" / "config.json").write_text("{}", encoding="utf-8")
+try:
+    bw.privacy_scan(staging36)
+    privacy_caught = False
+except SystemExit:
+    privacy_caught = True
+check(privacy_caught, "隐私扫描能拦下混入的 config.json")
+
+txt = bw.readme_windows_txt("0.1.0")
+check(txt.startswith("﻿") and "\r\n" in txt, "README-Windows.txt 带 BOM 与 CRLF（老记事本可读）")
+
 SRV.shutdown()
 shutil.rmtree(TMP, ignore_errors=True)
 print(f"\n{'='*46}\n通过 {PASSED} 项，失败 {FAILED} 项\n{'='*46}")
