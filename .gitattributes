@@ -1,0 +1,4 @@
+# 启动脚本的换行符与平台绑定：bat 必须是 CRLF（cmd 对 LF 解析不可靠），
+# .command 必须是 LF（macOS 的 shebang 不认 CRLF）。与各机器的 autocrlf 配置无关。
+*.bat text eol=crlf
+*.command text eol=lf

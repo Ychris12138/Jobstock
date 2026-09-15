@@ -25,6 +25,7 @@ import json
 import os
 import re
 import shutil
+import socket
 import sqlite3
 import sys
 import threading
@@ -2069,6 +2070,35 @@ def _open_browser(url):
     threading.Timer(0.6, lambda: webbrowser.open(url)).start()
 
 
+def _port_free(p):
+    """不开 SO_REUSEADDR 裸探测端口是否空闲。
+
+    Windows 的 SO_REUSEADDR 语义与 Unix 不同：端口已被监听时 bind 仍成功，
+    后绑的 socket 被「影子化」——新连接全归先绑者，后来的实例永远收不到请求。
+    ThreadingHTTPServer 会开 REUSEADDR，单靠它 bind 成不成功判断不了占用。
+    """
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        s.bind(("127.0.0.1", p))
+        return True
+    except OSError:
+        return False
+    finally:
+        s.close()
+
+
+def pick_port(base, scan):
+    """从 base 起扫描 scan 个端口，返回 (port, server)；全被占返回 (None, None)。"""
+    for p in range(base, base + scan):
+        if sys.platform.startswith("win") and not _port_free(p):
+            continue
+        try:
+            return p, ThreadingHTTPServer(("127.0.0.1", p), Handler)
+        except OSError:
+            continue
+    return None, None
+
+
 def main():
     # 非 UTF-8 locale 的 Windows 重定向输出时，启动横幅里的 emoji/中文会炸。
     # reconfigure 只在新式 TextIOWrapper 上存在，老式包装（如某些 IDE）没有就跳过
@@ -2150,15 +2180,7 @@ def main():
     # 端口默认自动避让：8770 被别的程序占了就用 8771…，双击启动永远能打开。
     # 显式传 --port 则尊重用户选择，占用时报错退出（脚本/定时任务依赖固定端口）。
     explicit = any(a == "--port" or a.startswith("--port=") for a in sys.argv)
-    ports = [args.port] if explicit else range(args.port, args.port + 10)
-    port, srv = None, None
-    for p in ports:
-        try:
-            srv = ThreadingHTTPServer(("127.0.0.1", p), Handler)
-            port = p
-            break
-        except OSError:
-            continue
+    port, srv = pick_port(args.port, 1 if explicit else 10)
     if srv is None:
         hint = f"python server.py --port {args.port + 10}"
         print(f"端口 {args.port}" + ("" if explicit else f"～{args.port + 9}")

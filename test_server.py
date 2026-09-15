@@ -1142,6 +1142,28 @@ finally:
     server.CONFIG_PATH = real_cfg_path
     server.configure(data_dir=str(TMP), cv_dir=str(TMP / "cv"))
 
+# ---- 34. 端口避让：Windows 下被 REUSEADDR 影子化的端口必须视为被占 ----------------
+print("\n【34】端口避让（Windows 影子占用防护）")
+import socket as _sock
+
+hold = _sock.socket(_sock.AF_INET, _sock.SOCK_STREAM)
+# 先绑者开 REUSEADDR，模拟另一个在跑的 Jobstock 实例：Windows 上此后 HTTPServer
+# 仍能 bind 成功但被影子化（收不到连接），不加裸探测时本用例在 Windows 必红。
+hold.setsockopt(_sock.SOL_SOCKET, _sock.SO_REUSEADDR, 1)
+hold.bind(("127.0.0.1", 0))
+hold.listen(1)
+base = hold.getsockname()[1]
+try:
+    check(not server._port_free(base), "裸探测识别被占端口")
+    p1, s1 = server.pick_port(base, 3)
+    check(s1 is not None and p1 != base, "被占端口被跳过，避让到下一个空闲端口")
+    if s1 is not None:
+        s1.server_close()
+    p2, s2 = server.pick_port(base, 1)   # 显式 --port 的扫描范围只有 1
+    check(s2 is None and p2 is None, "唯一候选端口被占时报不可用（显式 --port 语义）")
+finally:
+    hold.close()
+
 SRV.shutdown()
 shutil.rmtree(TMP, ignore_errors=True)
 print(f"\n{'='*46}\n通过 {PASSED} 项，失败 {FAILED} 项\n{'='*46}")

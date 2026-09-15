@@ -33,6 +33,11 @@ def resolve(p):
 
 
 def main():
+    # 与 server.py 同一处理：非 UTF-8 locale 的 Windows 重定向输出时，
+    # 「⇩」等字符会让 GBK/cp1252 直接 UnicodeEncodeError。
+    for s in (sys.stdout, sys.stderr):
+        if hasattr(s, "reconfigure"):
+            s.reconfigure(encoding="utf-8", errors="replace")
     ap = argparse.ArgumentParser(description="Jobstock 一键安装")
     ap.add_argument("--data-dir", help="数据目录（岗位 JSON + sqlite 索引）")
     ap.add_argument("--cv-dir", help="CV 目录")

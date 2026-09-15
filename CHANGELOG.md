@@ -1,5 +1,13 @@
 # Changelog
 
+## [Unreleased]
+
+### Fixed
+- **Windows `start.bat` 双击启动**：cmd 按系统 OEM 代码页分块解析 bat，UTF-8 中文行可能被从中间劈开当成命令执行（乱码报错）；脚本改为纯 ASCII（中文文案留在 Python 侧），并用 `.gitattributes` 钉死 `*.bat` CRLF、`*.command` LF
+- **首次启动**：`start.bat` 在没有 `config.json` 时自动先跑 `install.py`，不再直接报「数据目录不存在」
+- **Windows 端口影子化**：`SO_REUSEADDR` 在 Windows 上允许重复 bind 同一端口，后启动的实例「bind 成功但永远收不到连接」；`pick_port` 先用不开 REUSEADDR 的裸 socket 探测，端口自动避让与 `--port` 占用报错在 Windows 恢复正确（§34 回归测试）
+- **`install.py`**：非 UTF-8 locale 的 Windows 重定向输出时打印「⇩」等字符抛 `UnicodeEncodeError`（与 server.py 同一 reconfigure 处理）
+
 ## [0.1.0] — 2026-09-15
 
 ### Added
