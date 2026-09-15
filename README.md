@@ -1,199 +1,273 @@
 # Jobstock
 
-**把招聘信息和投递进度，安安静静放在你自己电脑上的求职管理工具。**
+**一个为中文求职场景设计的本地求职 Dashboard。**
 
-不用注册、不上传简历、不联网也能用。每条岗位是一个可编辑的 JSON 文件，页面上点几下就能记进度；改坏了有历史版本可回退，重要节点一键打包备份。
+把岗位、截止日期、投递进度、面试状态和自己的备注放在一个页面里管理。**不注册账号、不上传简历、不依赖云服务**，数据默认只保存在你的电脑上。
 
-- 纯 Python 标准库，**零依赖**（不要 npm、不要虚拟环境也行）
-- Windows / macOS 通用，双击即可启动
-- 数据分层清晰：岗位是客观信息，投递状态只属于你本机
-- 可配合 Claude Code / Cursor / MiMo 等 AI Agent 自动搜岗、写岗位
+> 适合：校招 / 实习 / 社招，同时投很多公司、需要长期整理岗位的人。
+
+- 🖥️ **本地优先**：岗位、投递状态、CV 都留在本机
+- ⚡ **零依赖**：Python 标准库 + 原生 HTML/JS，不需要 npm / pip install
+- 🍎🪟 **Windows / macOS 可用**：安装后可双击启动
+- 📋 **一页管理求职流程**：待投递 → 已投递 → 笔试 → 面试 → Offer
+- ⏰ **截止日期提醒**：支持 Markdown 复制和 `.ics` 日历导出
+- 🤖 **Agent 友好**：Claude Code / Codex / Cursor 等可直接帮你初始化、搜岗和写入岗位
+- 🧯 **有后悔药**：岗位历史版本、个人状态快照、全量备份
 
 ---
 
-## 三分钟上手
+## 60 秒开始
 
-### 1. 安装（只需 Python 3.8+）
+你只需要 **Python 3.8+**。
+
+### 普通用户
 
 ```bash
 git clone https://github.com/Ychris12138/Jobstock.git
 cd Jobstock
-python install.py          # macOS 若无 python 命令则用 python3 install.py
+python install.py
 ```
 
-安装时可以一路回车：数据和 CV 默认放在工具目录里。也可以指定到别的磁盘，例如：
+macOS 如果没有 `python` 命令：
+
+```bash
+python3 install.py
+```
+
+安装时不知道怎么选，**一路回车即可**。
+
+安装完成后：
+
+| 系统 | 启动方式 |
+|---|---|
+| Windows | 双击 `start.bat` |
+| macOS | 双击 `start.command` |
+| 通用 | `python server.py` / `python3 server.py` |
+
+浏览器会自动打开本地页面，默认地址：<http://localhost:8770>。
+
+---
+
+## 🤖 让 Agent 帮你安装（推荐）
+
+如果你已经在用 Claude Code、Codex、Cursor 或其他 Coding Agent，**不用自己研究安装步骤**。
+
+把下面这段直接发给 Agent：
+
+```text
+请帮我安装并初始化 Jobstock：
+https://github.com/Ychris12138/Jobstock
+
+要求：
+1. clone 到合适的本地目录；
+2. 先阅读 README.md 和 AGENTS.md；
+3. 使用默认配置完成安装；
+4. 运行 test_server.py，确认测试通过；
+5. 启动本地 WebUI；
+6. 不上传、提交或同步我的 CV、岗位数据、投递状态和 config.json；
+7. 完成后告诉我本地目录和启动方式。
+```
+
+### Agent 快捷命令
+
+macOS / Linux：
+
+```bash
+git clone https://github.com/Ychris12138/Jobstock.git && cd Jobstock && python3 install.py --yes && python3 test_server.py
+```
+
+Windows PowerShell / CMD（有 `python` 时）：
+
+```bash
+git clone https://github.com/Ychris12138/Jobstock.git && cd Jobstock && python install.py --yes && python test_server.py
+```
+
+安装完后运行：
+
+```bash
+python server.py
+```
+
+> Agent 进入仓库后应先读 [`AGENTS.md`](AGENTS.md)。那里写清楚了哪些数据可以改、哪些个人数据绝对不要碰。
+
+---
+
+## 第一次打开后做什么？
+
+最简单的用法只有三步：
+
+1. 点 **「＋ 新增岗位」**，录入公司和岗位；
+2. 投递后更新 **投递状态**，写自己的备注；
+3. 每隔一段时间点 **「⇩ 全量备份」**。
+
+如果你已经有 CV，可以把文件放进 `cv/`，然后在页面的 **「CV 与解读」** 中使用内置提示词，让 Agent 帮你生成关键词解读和搜岗计划。
+
+---
+
+## Jobstock 能做什么？
+
+| 功能 | 你实际会用到的东西 |
+|---|---|
+| 岗位库 | 公司、岗位、职位号、城市、薪资、链接、截止日期、JD、标签 |
+| 投递管理 | 待投递 / 已投递 / 笔试 / 面试 / Offer / 已拒绝 / 已归档 |
+| 搜索筛选 | 公司、分类、城市、招聘类型、状态、来源、标签、全文关键词 |
+| 截止提醒 | 7 天内截止、已过期、复制 Markdown、导出 `.ics` 日历 |
+| CV 匹配 | 根据 `cv/` 中的关键词解读显示简单匹配度 |
+| 去重 | 同职位号 / 同链接拦截，重复岗位可合并 |
+| 历史版本 | 岗位保留最近 3 份历史；个人状态保留最近 10 份快照 |
+| 本地备份 | 一键导出 zip，方便换电脑或重要操作前备份 |
+| Agent 协作 | 内置初始化、CV 解读、全网搜岗提示词 |
+
+---
+
+## 为什么它适合和 AI Agent 一起用？
+
+很多求职工具把 AI 做成一个聊天框；Jobstock 更希望 **Agent 直接维护你的求职资料库**。
+
+你可以让 Agent：
+
+- 根据你的 CV 和求职方向批量搜索岗位；
+- 按统一字段整理公司、岗位、JD、城市、截止日期；
+- 自动去重；
+- 更新 `jobs/*.json` 后重建索引；
+- 帮你找出快截止但还没投的岗位。
+
+同时，**岗位信息和个人投递状态是分开的**：Agent 可以整理岗位情报，但不会因为批量改岗位而覆盖你的个人备注和投递时间线。
+
+WebUI 中已经内置三套可复制提示词：
+
+- **初始化提示词**：让 Agent 读懂项目并准备你的求职工作区
+- **CV 解读提示词**：把简历整理成固定格式的关键词解读
+- **全网搜岗提示词**：根据方向尽量多地收集候选岗位
+
+---
+
+## 数据真的只在本地吗？
+
+默认是。
+
+```text
+jobs/<id>.json      岗位信息
+local/status.json   你的投递状态、备注和时间线
+data/jobs.db        可随时重建的 SQLite 索引
+cv/                 CV 与解读
+config.json         本机配置
+```
+
+这些个人目录默认都已经写进 `.gitignore`：
+
+- `jobs/`
+- `local/`
+- `cv/`（仅保留说明文件）
+- `config.json`
+- SQLite 索引
+
+因此正常使用时，不会因为你 `git add .` 就把 CV 或投递记录直接提交出去。
+
+不过仍建议：**公开 fork / 修改仓库前，先运行 `git status` 再确认一次。**
+
+### 岗位信息和个人状态为什么分开？
+
+| | 岗位层 | 个人层 |
+|---|---|---|
+| 内容 | 公司、岗位、JD、链接、截止日期 | 投递到哪一步、个人备注、时间线 |
+| 位置 | `jobs/*.json` | `local/status.json` |
+| Agent 可批量维护 | ✅ | 默认不应该 |
+
+这也是 Jobstock 最重要的数据设计之一。
+
+---
+
+## 数据目录可以放到别的地方
+
+默认数据就在 Jobstock 目录中。如果你想把数据单独放在文档盘或移动硬盘：
 
 ```bash
 python install.py --data-dir "D:\jobs-data" --cv-dir "~/Documents/my-cv"
 ```
 
-### 2. 启动
-
-| 系统 | 方式 |
-|---|---|
-| macOS | 双击 `start.command` |
-| Windows | 双击 `start.bat` |
-| 通用 | 终端执行 `python server.py` |
-
-浏览器会自动打开（默认 <http://localhost:8770>）。端口被占用会自动换端口；已经开着一个实例时再启动，只会帮你打开页面，不会双开写坏数据。
-
-### 3. 开始用
-
-1. 点 **「＋ 新增岗位」** 录入第一条（公司、岗位必填）
-2. 在列表里点行，改 **投递状态**、写个人备注
-3. 需要时点 **「⇩ 全量备份」**，把 zip 存到 U 盘或网盘
-
-仓库里自带 2 条**虚构示例岗位**（示例科技 / 虚构云），熟悉界面后可直接删掉。
+配置会写进本机的 `config.json`。
 
 ---
 
-## 你现在能做什么
+## 一些有用的小功能
 
-| 能力 | 说明 |
-|---|---|
-| 岗位库 | 公司、岗位、职位号、分类、校招/社招/实习、多城市、薪资、链接、截止日期、标签、JD 快照 |
-| 投递进度 | 待投递 → 已投递 → 笔试 → 面试 → Offer / 已拒绝 / 已归档；时间线自动记录 |
-| 筛选搜索 | 分类、类型、城市、状态、公司、来源、标签（多选 AND）、全文关键词（含 JD） |
-| 截止提醒 | 顶部汇总 7 天内截止与已过期；可复制 Markdown，或导出 `.ics` 进系统日历 |
-| CV 匹配度 | 把 `cv/` 里的解读关键词与岗位文本比对，列表显示 `6/10`，悬停看命中词 |
-| 后悔药 | 岗位每次保存前自动留 3 份历史；个人状态写前留 10 份快照 |
-| 去重合并 | 同职位号/同链接自动拦下；重复岗位可一键合并，被合并的还能恢复 |
-| 全量备份 | 一个 zip 带走岗位 + 历史 + 投递状态（不含 CV 原文，更安全） |
-| AI 协作 | 内置初始化提示词、全网搜岗提示词、CV 解读提示词，复制给 Agent 即可 |
+### 截止日期 ≠ 投递状态
 
----
+岗位截止日期是客观信息；你是否还打算投，是个人状态。
 
-## 和 AI Agent 一起用（推荐）
+- 岗位停止招聘：`closed`
+- 你自己决定不投：`已归档`
 
-WebUI 岗位页顶部有 **「🚀 用 AI Agent 自动化初始化」**（空库时更显眼）：
+两者不会混在一起。
 
-1. 用 Claude Code / Cursor / MiMo / Codex **打开本工具目录**
-2. 点「复制初始化提示词」，粘贴给 Agent
-3. Agent 会：读懂工具约定 → 检查/生成 CV 解读 → **请你确认**方向与关键词  
-4. 你同意后，它再按内置搜岗提示词**尽量多**地搜索匹配岗位并写入 `jobs/`
-5. 最后自动 `reindex`，你到网页里看匹配度、标投递状态
+### 尽量填写官方职位号
 
-「CV 与解读」页也可以单独复制：
+`job_no` 是最可靠的去重信号。没有职位号时才依赖链接和其他字段判断重复。
 
-- **CV 解读提示词**：生成固定格式的 `cv/<名字>.reading.md`
-- **全网搜岗提示词**：多渠道、多关键词组合，宁多勿漏
+### 分类可以自定义
 
-> 搜岗结果只是「客观岗位情报」。你的投递进度、个人备注始终只在本机 `local/`，不会被写进岗位 JSON。
-
----
-
-## 数据放在哪（很重要）
-
-```
-jobs/<id>.json      岗位层：招聘信息（可共享的客观内容）
-                    每次覆盖前 → jobs/.history/<id>/ 留最近 3 份
-local/status.json   个人层：投递状态 + 个人备注 + 时间线（只在本机）
-                    每次写入前 → local/backups/ 留最近 10 份
-data/jobs.db        索引层：派生的 sqlite，随时可重建，不是真相源
-cv/                 你的简历与解读（最敏感，不进 git）
-config.json         本机配置（数据目录、分类、署名等）
-```
-
-**所有个人数据默认不进 git。** 换电脑：用「⇩ 全量备份」+ 手动拷 `cv/`。
-
-| | 岗位层 `jobs/*.json` | 个人层 `local/status.json` |
-|---|---|---|
-| 写什么 | 公司 / 岗位 / 链接 / JD / 截止… | 我投到哪一步、我的备注、时间线 |
-| 谁维护 | 你（或 AI 按约定写文件） | 只在你这台机器 |
-
-### 维度别混用
-
-| 维度 | 字段 | 例子 |
-|---|---|---|
-| 工作地点 | `locations[]` | 北京、上海、远程（多地全列） |
-| 招聘类型 | `recruit_type` | 校招 / 社招 / 实习 |
-| 岗位分类 | `category` | 可在 `config.json` 的 `categories` 里定制 |
-| 主题标签 | `tags[]` | AIGC、2027届…（多选是「同时具备」） |
-
-分类示例：安装时可填 `AI产品,增长,设计`；不配置则用默认通用列表。
-
-### 已下架 ≠ 已归档
-
-- **下架 `closed`**：投递入口关了（客观事实，岗位层）
-- **已归档**：你自己选择不投了（个人状态，默认从列表隐藏）
-
----
-
-## 常用操作
-
-**筛选**  
-第一行是高频条件；「更多筛选」里有公司 / 来源 / 截止 ≤ / 匹配 ≥ 等。折叠起来的条件**仍然生效**，按钮上会标数量。  
-同一维度多选是 OR，不同维度之间是 AND；多个标签是 AND。
-
-**录入方式**
-
-1. 网页点「＋ 新增岗位」
-2. 让 AI 按 `AGENTS.md` 写 `jobs/*.json`，再点「↻ 重建索引」
-
-**尽量填官方职位号 `job_no`**  
-这是去重主键。有职位号时，同一个岗录多次会被直接拦下。
-
-**自定义分类**（`config.json`）
+安装时可以直接填写，也可以修改 `config.json`：
 
 ```json
 {
-  "categories": ["AI产品", "算法", "设计", "运营", "其他"],
+  "categories": ["AI产品", "算法", "数据", "研究", "其他"],
   "my_name": "你的名字"
 }
 ```
 
-改完重启 server 生效。枚举外的旧数据会**保留并告警**，不会被静默清掉。
-
 ---
 
-## API（给进阶用户 / Agent）
+<details>
+<summary><strong>给 Agent / 开发者：数据约定</strong></summary>
+
+完整规则见 [`AGENTS.md`](AGENTS.md)。最重要的几条：
+
+- Agent 写岗位时只修改岗位层字段；
+- 不要把 `status` / `my_notes` / `history` 写进岗位 JSON；
+- 修改岗位文件后运行 `python server.py --reindex`；
+- 城市放 `locations[]`，招聘类型放 `recruit_type`，不要都塞进 tags；
+- 不直接修改 SQLite；
+- 不手改或清空 `jobs/.history/`；
+- 删除文件前先征得用户同意。
+
+</details>
+
+<details>
+<summary><strong>API</strong></summary>
 
 | 方法 | 路径 | 说明 |
 |---|---|---|
-| GET | `/api/jobs` | 列表 + 筛选 facets + 截止统计 + CV 关键词 |
-| GET | `/api/jobs/<id>` | 单条（含时间线、匹配词） |
-| POST | `/api/jobs` | 新增 |
-| PUT | `/api/jobs/<id>` | 修改（需 `base_rev` 乐观锁） |
-| POST | `/api/jobs/<id>/status` | 只改本机投递状态 |
-| POST | `/api/reindex` | 重建索引，返回 skipped / warnings / duplicates |
-| POST | `/api/dedupe` | 合并强信号重复岗 |
-| GET | `/api/backup` | 全量备份 zip |
+| GET | `/api/jobs` | 岗位列表、筛选项、截止统计、CV 关键词 |
+| GET | `/api/jobs/<id>` | 单条岗位 |
+| POST | `/api/jobs` | 新增岗位 |
+| PUT | `/api/jobs/<id>` | 修改岗位（使用 `base_rev` 乐观锁） |
+| POST | `/api/jobs/<id>/status` | 修改本机投递状态 |
+| POST | `/api/reindex` | 重建索引 |
+| POST | `/api/dedupe` | 合并强信号重复岗位 |
+| GET | `/api/backup` | 导出全量备份 zip |
 | GET | `/api/cv` | CV 文件与解读 |
-| GET | `/api/prompts` | 初始化 / 搜岗 / CV 解读三套提示词 |
+| GET | `/api/prompts` | 初始化 / 搜岗 / CV 解读提示词 |
 
-导出 CSV：
+</details>
 
-```bash
-sqlite3 -header -csv data/jobs.db \
-  "SELECT company, position, url, deadline FROM jobs" > jobs.csv
-```
-
----
-
-## 自测
+<details>
+<summary><strong>开发 / 自测</strong></summary>
 
 ```bash
-python3 test_server.py
+python test_server.py
 ```
 
-全部断言在临时目录跑，不碰你的真实数据。覆盖分层、历史版本、去重合并、筛选语义、截止提醒、CV 匹配、入口安全等。
+测试使用临时目录，不会碰你的真实岗位和投递数据。CI 会在 Ubuntu 和 Windows 上自动跑同一套测试。
+
+项目坚持 **零第三方运行时依赖**：Python 标准库 + 原生 JavaScript，不需要 npm 构建。
+
+</details>
 
 ---
 
-## 给 AI 的约定
+## 当前版本
 
-完整协议见 [`AGENTS.md`](AGENTS.md)。摘要：
+**v0.0.1**
 
-- 只写岗位层字段，**不要**把 `status` / `my_notes` / `history` 写进 `jobs/*.json`
-- 改完必须 `python server.py --reindex`，并检查报告
-- 城市进 `locations`，招聘类型进 `recruit_type`，不要塞进 `tags`
-- 不删除文件；岗位没了用 `closed: true`，自己不投用「已归档」
-- `jobs/.history/` 不要手改、不要清空
-
----
-
-## 版本
-
-当前：**v0.0.1**
-
-隐私默认本地；若你公开分享本仓库，请确认 `jobs/`、`local/`、`cv/`、`config.json` 未被强制加入 git。
+Jobstock 仍处于早期版本。如果你遇到安装、数据迁移、岗位格式或 Agent 协作问题，欢迎提交 Issue。
