@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""job-stock 一键安装/配置。
+"""Jobstock 一键安装/配置。
 
 用法：
     python install.py                                   # 交互式（推荐）
@@ -33,7 +33,7 @@ def resolve(p):
 
 
 def main():
-    ap = argparse.ArgumentParser(description="job-stock 一键安装")
+    ap = argparse.ArgumentParser(description="Jobstock 一键安装")
     ap.add_argument("--data-dir", help="数据目录（岗位 JSON + sqlite 索引）")
     ap.add_argument("--cv-dir", help="CV 目录")
     ap.add_argument("--yes", action="store_true", help="不询问，直接用默认值（仓库内）")
@@ -42,7 +42,7 @@ def main():
     if sys.version_info < (3, 8):
         sys.exit("需要 Python 3.8 或更高版本。")
 
-    print("job-stock 安装配置")
+    print("Jobstock 安装配置")
     print("（所有数据只存在本机：不联网、不需要 git；跨机器搬家用 WebUI 的「⇩ 全量备份」）")
     print("注意：投递状态存在 <数据目录>/local/ 下，换电脑时要靠备份 zip 带走。\n")
 

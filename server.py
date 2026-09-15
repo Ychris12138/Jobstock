@@ -40,7 +40,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent
 CONFIG_PATH = ROOT / "config.json"
 WEB_DIR = ROOT / "web"
-SERVER_VERSION = "0.4.0"   # 随功能性改动一起更新；前端用它检测「网页新、后台旧」
+SERVER_VERSION = "0.0.1"   # 随功能性改动一起更新；前端用它检测「网页新、后台旧」
 
 _my_name_cache = {"n": None, "done": False}
 
@@ -203,7 +203,7 @@ def acquire_instance_guard():
     try:
         fl.__enter__()
     except LockBusy:
-        sys.exit(f"数据目录已被另一个 job-stock 实例占用：{LOCAL_DIR}\n"
+        sys.exit(f"数据目录已被另一个 Jobstock 实例占用：{LOCAL_DIR}\n"
                  f"同一份数据同时只跑一个 server；先停掉旧的那个（关掉它的终端窗口即可）。")
     _INSTANCE_GUARD = fl      # 保住引用，进程存活期间不释放；退出时由操作系统兜底
 
@@ -357,7 +357,7 @@ CV_PROMPT = """请阅读我提供的 CV，生成一份「CV 解读文件」，�
 要求：只写 CV 里有据可查的内容，不要虚构。"""
 
 # 全网搜岗：基于 CV 解读尽量捞全，宁多勿漏；去重与格式化交给 jobs/ 写入规范。
-JOB_SEARCH_PROMPT = """你是 job-stock 的职位猎手。请基于本仓库 cv/*.reading.md（若无则先要 CV 并生成解读），
+JOB_SEARCH_PROMPT = """你是 Jobstock 的职位猎手。请基于本仓库 cv/*.reading.md（若无则先要 CV 并生成解读），
 做一轮**尽可能全面**的全网职位搜索，把匹配岗位写入 jobs/*.json。
 
 ## 目标
@@ -392,7 +392,7 @@ JOB_SEARCH_PROMPT = """你是 job-stock 的职位猎手。请基于本仓库 cv/
 城市完全不可接受且无远程。
 保留并标注优先级：P0 高度对口 / P1 可迁移 / P2 长期目标或需内推。
 
-## 第四步：按 job-stock 规范落盘
+## 第四步：按 Jobstock 规范落盘
 每条岗位一个 JSON 文件 jobs/<id>.json，遵守 schema 与 AGENTS.md：
 - 必填：id / company / position；尽量填 job_no
 - city → locations[]；招聘类型 → recruit_type；分类 → category（用 config.json 的 categories）
@@ -408,7 +408,7 @@ JOB_SEARCH_PROMPT = """你是 job-stock 的职位猎手。请基于本仓库 cv/
 
 禁止编造职位号、薪资、截止日期；搜不到就如实说该渠道无结果。"""
 
-BOOTSTRAP_PROMPT = """你是 job-stock 工具的初始化助手。当前工作目录就是工具根目录。
+BOOTSTRAP_PROMPT = """你是 Jobstock 工具的初始化助手。当前工作目录就是工具根目录。
 
 请按顺序完成初始化，并在每一步向用户确认关键选择：
 
@@ -1956,7 +1956,7 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def _server_alive(port):
-    """探测本机端口上是否已经跑着一个 job-stock（GET /api/jobs 通即为活）。"""
+    """探测本机端口上是否已经跑着一个 Jobstock（GET /api/jobs 通即为活）。"""
     try:
         with urllib.request.urlopen(f"http://127.0.0.1:{port}/api/jobs", timeout=1.5) as r:
             return r.status == 200
@@ -1975,7 +1975,7 @@ def main():
     for s in (sys.stdout, sys.stderr):
         if hasattr(s, "reconfigure"):
             s.reconfigure(encoding="utf-8", errors="replace")
-    ap = argparse.ArgumentParser(description="job-stock 服务器")
+    ap = argparse.ArgumentParser(description="Jobstock 服务器")
     ap.add_argument("--port", type=int, default=8770)
     ap.add_argument("--data-dir", help="数据目录（内含 jobs/ local/ data/），覆盖 config.json")
     ap.add_argument("--cv-dir", help="CV 目录，覆盖 config.json")
@@ -1999,7 +1999,7 @@ def main():
         for p in range(args.port, args.port + 10):
             if _server_alive(p):
                 url = f"http://localhost:{p}"
-                print(f"job-stock 已经在运行：{url}\n（同一份数据只能开一个实例，这次只帮你打开页面。）")
+                print(f"Jobstock 已经在运行：{url}\n（同一份数据只能开一个实例，这次只帮你打开页面。）")
                 if not args.no_open:
                     webbrowser.open(url)
                 return
@@ -2065,7 +2065,7 @@ def main():
               + f" 被占用，换个端口：{hint}")
         sys.exit(1)
     url = f"http://localhost:{port}"
-    print(f"job-stock 已启动：{url}  （索引 {r['count']} 条岗位，关掉本窗口或 Ctrl+C 停止）")
+    print(f"Jobstock 已启动：{url}  （索引 {r['count']} 条岗位，关掉本窗口或 Ctrl+C 停止）")
     print(f"  岗位数据（自动留 3 份历史版本）：{JOBS_DIR}\n"
           f"  个人状态：{local_path()}\n  CV 目录：{CV_DIR}")
     if not args.no_open:
